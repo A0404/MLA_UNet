@@ -1,4 +1,0 @@
-Dataset complet			dataset_base.h5 / dataset_full.csv	Base principale
-Données d’entraînement		train_data.h5				Données pour le training
-Données de validation		val_data.h5				Données pour la validation
-Données de test			test_data.h5				Données de test
