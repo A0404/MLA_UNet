@@ -1,0 +1,2 @@
+Modèle général		pretrained_model.h5 / .pth	Modèle de base
+Ajuster si d'autres fichiers avec noms en anglais et _ à la place des espaces.
