@@ -1,84 +1,130 @@
 import torch
-from torch.nn import Conv2d, ConvTranspose2d, ReLU, MaxPool2d
-from torch import cat as Concatenate
+import torch.nn as nn
+import torch.nn.functional as F
 
+# --------------------------------------------------
+#  1. Fonction de Center Crop 
+# --------------------------------------------------
+def center_crop(feature_map, target_tensor):
+    _, _, h, w = feature_map.shape
+    _, _, th, tw = target_tensor.shape
 
-### Copilot code ###
-def Center_crop(tensor, target):
-    """ Concatenate along the channel dimension. In PyTorch image tensors are (N, C, H, W).
-        Here the encoder feature map may be larger by some pixels.
-        We crop it centrally to match the upsampled tensor spatial size before concatenation to avoid shape mismatch.
+    delta_h = h - th
+    delta_w = w - tw
 
-        Center-crop `tensor` to `target_size` (th, tw).
-        tensor: (N, C, H, W)
-        target_size: (th, tw) """
-    
-    if tensor.shape[2:] != target.shape[2:]:
-        _, _, h, w = tensor.shape
-        th, tw = target.shape[2:]
-        if h == th and w == tw:
-            return tensor
-        top = (h - th) // 2
-        left = (w - tw) // 2
-        tensor = tensor[:, :, top:top+th, left:left+tw]
-    return tensor
+    top = delta_h // 2
+    left = delta_w // 2
+
+    return feature_map[:, :, top:top+th, left:left+tw]
+
+# --------------------------------------------------
 ### ------------- ###
+# --------------------------------------------------
+#  2. Bloc de base : Double Convolution (sans padding)
+# --------------------------------------------------
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=0),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=0),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        return self.conv(x)
 
 
-def UNet_Model(input):
-    # First Encoder Block
-    conv572_570 = ReLU(Conv2d(in_channels=1, out_channels=64, kernel_size=3, stride=1, padding=0)(input))
-    conv570_568 = ReLU(Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=0)(conv572_570))
-    pool568_284 = MaxPool2d(kernel_size=2, stride=2)(conv570_568)
+# --------------------------------------------------
+#  3. ENCODER 
+#     Chaque étape = 2 conv + maxpool (sauf bottleneck)
+# --------------------------------------------------
+class Encoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.enc1 = DoubleConv(1, 64)
+        self.enc2 = DoubleConv(64, 128)
+        self.enc3 = DoubleConv(128, 256)
+        self.enc4 = DoubleConv(256, 512)
+        self.bottleneck = DoubleConv(512, 1024)
+        self.pool = nn.MaxPool2d(2)
 
-    # Second Encoder Block
-    conv284_282 = ReLU(Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=0)(pool568_284))
-    conv282_280 = ReLU(Conv2d(in_channels=128, out_channels=128, kernel_size=3, stride=1, padding=0)(conv284_282))
-    pool280_140 = MaxPool2d(kernel_size=2, stride=2)(conv282_280)
+    def forward(self, x):
+        s1 = self.enc1(x)
+        x = self.pool(s1)
 
-    # Third Encoder Block
-    conv140_138 = ReLU(Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=1, padding=0)(pool280_140))
-    conv138_136 = ReLU(Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=1, padding=0)(conv140_138))
-    pool136_68 = MaxPool2d(kernel_size=2, stride=2)(conv138_136)
+        s2 = self.enc2(x)
+        x = self.pool(s2)
 
-    # Fourth Encoder Block
-    conv68_66 = ReLU(Conv2d(in_channels=256, out_channels=512, kernel_size=3, stride=1, padding=0)(pool136_68))
-    conv66_64 = ReLU(Conv2d(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=0)(conv68_66))
-    pool64_32 = MaxPool2d(kernel_size=2, stride=2)(conv66_64)
+        s3 = self.enc3(x)
+        x = self.pool(s3)
 
-    # Bottleneck
-    conv32_30 = ReLU(Conv2d(in_channels=512, out_channels=1024, kernel_size=3, stride=1, padding=0)(pool64_32))
-    conv30_28 = ReLU(Conv2d(in_channels=1024, out_channels=1024, kernel_size=3, stride=1, padding=0)(conv32_30))
+        s4 = self.enc4(x)
+        x = self.pool(s4)
 
-    # First Decoder Block
-    up28_56 = ConvTranspose2d(in_channels=1024, out_channels=512, kernel_size=2, stride=2)(conv30_28)   # Depth : 512
-    conv66_64_cropped = Center_crop(conv66_64, up28_56)
-    concat56_512 = Concatenate((conv66_64_cropped, up28_56), dim=1)     # Depth : 1024
-    conv56_54 = ReLU(Conv2d(in_channels=1024, out_channels=512, kernel_size=3, stride=1, padding=0)(concat56_512))  # Depth : 512
-    conv54_52 = ReLU(Conv2d(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=0)(conv56_54))
+        x = self.bottleneck(x)
 
-    # Second Decoder Block
-    up52_104 = ConvTranspose2d(in_channels=512, out_channels=256, kernel_size=2, stride=2)(conv54_52)   # Depth : 256
-    conv138_136_cropped = Center_crop(conv138_136, up52_104)
-    concat104_256 = Concatenate((conv138_136_cropped, up52_104), dim=1)     # Depth : 512
-    conv104_102 = ReLU(Conv2d(in_channels=512, out_channels=256, kernel_size=3, stride=1, padding=0)(concat104_256))  # Depth : 256
-    conv102_100 = ReLU(Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=1, padding=0)(conv104_102))      
+        return x, [s1, s2, s3, s4]
+# --------------------------------------------------
+#  4. DECODER 
+#     upsampling + cropping + concatenation + conv
+# --------------------------------------------------
+class Decoder(nn.Module):
+    def __init__(self):
+        super().__init__()
 
-    # Third Decoder Block
-    up100_200 = ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=2, stride=2)(conv102_100)   # Depth : 128
-    conv282_280_cropped = Center_crop(conv282_280, up100_200)
-    concat200_128 = Concatenate((conv282_280_cropped, up100_200), dim=1)     # Depth : 256
-    conv200_198 = ReLU(Conv2d(in_channels=256, out_channels=128, kernel_size=3, stride=1, padding=0)(concat200_128))  # Depth : 128
-    conv198_196 = ReLU(Conv2d(in_channels=128, out_channels=128, kernel_size=3, stride=1, padding=0)(conv200_198))  
+        self.up1 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.dec1 = DoubleConv(1024, 512)
 
-    # Fourth Decoder Block
-    up196_392 = ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=2, stride=2)(conv198_196)   # Depth : 64
-    conv570_568_cropped = Center_crop(conv570_568, up196_392)
-    concat392_64 = Concatenate((conv570_568_cropped, up196_392), dim=1)     # Depth : 128
-    conv392_390 = ReLU(Conv2d(in_channels=128, out_channels=64, kernel_size=3, stride=1, padding=0)(concat392_64))  # Depth : 64
-    conv390_388 = ReLU(Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=0)(conv392_390))
+        self.up2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.dec2 = DoubleConv(512, 256)
 
-    # Output Layer
-    output = Conv2d(in_channels=64, out_channels=2, kernel_size=1, stride=1, padding=0)(conv390_388)    # Depth : 2
+        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec3 = DoubleConv(256, 128)
 
-    return output
+        self.up4 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec4 = DoubleConv(128, 64)
+
+    def forward(self, x, skips):
+        s1, s2, s3, s4 = skips
+
+        x = self.up1(x)
+        s4 = center_crop(s4, x)
+        x = torch.cat([s4, x], dim=1)
+        x = self.dec1(x)
+
+        x = self.up2(x)
+        s3 = center_crop(s3, x)
+        x = torch.cat([s3, x], dim=1)
+        x = self.dec2(x)
+
+        x = self.up3(x)
+        s2 = center_crop(s2, x)
+        x = torch.cat([s2, x], dim=1)
+        x = self.dec3(x)
+
+        x = self.up4(x)
+        s1 = center_crop(s1, x)
+        x = torch.cat([s1, x], dim=1)
+        x = self.dec4(x)
+
+        return x
+
+
+# --------------------------------------------------
+# --------------------------------------------------
+#  5. MODÈLE COMPLET U-NET 
+# --------------------------------------------------
+class UNet(nn.Module):
+    def __init__(self, num_classes=2):
+        super().__init__()
+        self.encoder = Encoder()
+        self.decoder = Decoder()
+        self.final_conv = nn.Conv2d(64, num_classes, kernel_size=1)
+
+    def forward(self, x):
+        x, skips = self.encoder(x)
+        x = self.decoder(x, skips)
+        x = self.final_conv(x)
+        return x
