@@ -4,8 +4,8 @@ from glob import glob
 import os
 
 # --- Configurations de Chemin ---
-SOURCE_PATHS = ["C:/Users/amine/Desktop/benign","C:/Users/amine/Desktop/malignant"] 
-OUTPUT_PATH = "C:/Users/amine/Desktop/clean" 
+SOURCE_PATHS = [r"C:\Users\adrie\Documents\5A\MLA\bdd\isbi-datasets\data\images", r"C:\Users\adrie\Documents\5A\MLA\bdd\isbi-datasets\data\labels"] 
+OUTPUT_PATH = r"C:\Users\adrie\Documents\5A\MLA\bdd\isbi-datasets\formed" 
 SIZE = 572 
 
 # --- Boucle de Traitement et d'Enregistrement ---
