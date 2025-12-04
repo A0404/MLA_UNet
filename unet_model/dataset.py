@@ -5,9 +5,6 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 
 
-# ========== PATHS =============================================================
-root_dir = r"C:\Users\adrie\Documents\5A\MLA\bdd\isbi-datasets\formed"
-
 # ========== DATASET DEFINITION ================================================
 class SegmentationDataset(Dataset):
     def __init__(self, file_list):
@@ -21,7 +18,8 @@ class SegmentationDataset(Dataset):
     def __getitem__(self, idx):
         # Retrieving paths
         img_path = self.images[idx]
-        mask_path = img_path.replace(".png", "_combined_mask.png")
+        base, _ = os.path.splitext(img_path)
+        mask_path = base + "_combined_mask.png"
 
         # Retrieving images and masks
         image = Image.open(img_path).convert("L")
@@ -36,16 +34,20 @@ class SegmentationDataset(Dataset):
     
 
 # ========== DATASET & DATALOADER CREATION =====================================
-# Split train/val
-images = sorted(glob(os.path.join(root_dir, "*[!_mask].png")))
-n = int(0.8 * len(images))
-train_files = images[:n]
-val_files = images[n:]
+def dataset_loaders(root_dir, ratio=0.8, batch_size=4):
+    # Split train/val
+    all_pngs = sorted(glob(os.path.join(root_dir, "*.png")))
+    images = [p for p in all_pngs if not p.endswith("_combined_mask.png")]
 
-# Datasets
-train_ds = SegmentationDataset(train_files)
-val_ds = SegmentationDataset(val_files)
+    n = int(ratio * len(images))
+    train_files = images[:n]
+    val_files = images[n:]
 
-# Loaders
-train_loader = DataLoader(train_ds, batch_size=4, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=4, shuffle=False)
+    # Datasets
+    train_ds = SegmentationDataset(train_files)
+    val_ds = SegmentationDataset(val_files)
+
+    # Loaders
+    train_loader = DataLoader(train_ds, batch_size, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size, shuffle=False)
+    return (train_loader, val_loader)

@@ -1,9 +1,8 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 # --------------------------------------------------
-#  1. Fonction de Center Crop 
+#  1. Fonction Center Crop 
 # --------------------------------------------------
 def center_crop(feature_map, target_tensor):
     _, _, h, w = feature_map.shape
@@ -20,7 +19,7 @@ def center_crop(feature_map, target_tensor):
 # --------------------------------------------------
 ### ------------- ###
 # --------------------------------------------------
-#  2. Bloc de base : Double Convolution (sans padding)
+#  2. Base bloc : Double Convolution (without) padding)
 # --------------------------------------------------
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -38,7 +37,7 @@ class DoubleConv(nn.Module):
 
 # --------------------------------------------------
 #  3. ENCODER 
-#     Chaque étape = 2 conv + maxpool (sauf bottleneck)
+#     Each step = 2 conv + maxpool (except in case of a bottleneck)
 # --------------------------------------------------
 class Encoder(nn.Module):
     def __init__(self):
@@ -114,7 +113,7 @@ class Decoder(nn.Module):
 
 # --------------------------------------------------
 # --------------------------------------------------
-#  5. MODÈLE COMPLET U-NET 
+#  5. U-NET MODEL
 # --------------------------------------------------
 class UNet(nn.Module):
     def __init__(self, num_classes=2):
