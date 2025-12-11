@@ -32,6 +32,30 @@ def write_image(path, img):
         f.write(buf.tobytes())
     return True
 
+def normalize_to_mean(img, target_mean=0.5):
+    """
+    Recenters the image mean towards target_mean.
+    `img` must be a NumPy array in [0, 255] or [0, 1].
+    """
+    img = img.astype(np.float32)
+    # Converted to [0,1] if 8-bit
+    if img.max() > 1.0:
+        img /= 255.0
+    mean = img.mean()
+
+    # Avoid division by zero
+    if mean < 1e-6:
+        return img
+
+    # Ratio to bring the mean closer to target_mean
+    scale = target_mean / mean
+    img = img * scale
+
+    # Clamp at [0,1]
+    img = np.clip(img, 0.0, 1.0)
+
+    return img
+
 def mask_combiner(input_path, output_path, size=572, threshold=0.5):
     """
     Combine masks for each image and save as PNG.
@@ -45,8 +69,13 @@ def mask_combiner(input_path, output_path, size=572, threshold=0.5):
     all_files = sorted(glob(os.path.join(input_path, "*")))
 
     # Separate images from masks
-    image_files = [p for p in all_files if "_mask" not in os.path.basename(p).lower()]
-    mask_files  = [p for p in all_files if "_mask" in os.path.basename(p).lower()]
+    image_files = []
+    mask_files = []
+    for p in all_files:
+        if "_mask" not in os.path.basename(p).lower():
+            image_files.append(p)
+        else:
+            mask_files.append(p)
 
     def extract_index(path):
         """Extract numeric index from filename like 'img_000.png'"""
@@ -76,6 +105,7 @@ def mask_combiner(input_path, output_path, size=572, threshold=0.5):
         if img.shape[:2] != (size, size):
             interp = cv2.INTER_AREA if max(img.shape[:2]) > size else cv2.INTER_CUBIC
             img = cv2.resize(img, (size, size), interpolation=interp)
+
         # Save image as PNG
         out_img_path = os.path.join(output_path, os.path.splitext(os.path.basename(img_path))[0] + ".png")
         write_image(out_img_path, img)
@@ -108,4 +138,4 @@ def mask_combiner(input_path, output_path, size=572, threshold=0.5):
         write_image(os.path.join(output_path, out_mask_name), final_mask)
         combined_count += 1
 
-    print(f"Combination completed: {combined_count} masks")
+    print(f"Combination completed: {combined_count} masks copied to {output_path}")

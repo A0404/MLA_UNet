@@ -17,8 +17,13 @@ def name_in_folder(input_dir, output_dir):
     if len(input_dir) == 1:
         source = input_dir[0]
         all_files = sorted(glob(os.path.join(source, "*")))
-        images = [p for p in all_files if "_mask" not in os.path.basename(p).lower()]
-        masks  = [p for p in all_files if "_mask" in os.path.basename(p).lower()]
+        images = []
+        masks = []
+        for p in all_files:
+            if "_mask" not in os.path.basename(p).lower():
+                images.append(p)
+            else:
+                masks.append(p)
     else:
         images = sorted(glob(os.path.join(input_dir[0], "*")))
         masks  = sorted(glob(os.path.join(input_dir[1], "*")))
@@ -66,4 +71,4 @@ def name_in_folder(input_dir, output_dir):
 
         count += 1
 
-    print(f"Normalization completed: {count} items copied to {output_dir}")
+    print(f"Naming completed: {count*2} items copied to {output_dir}")

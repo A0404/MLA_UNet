@@ -64,7 +64,7 @@ def test_model(
     test_ds,
     device,
     batch_size=1,
-    num_samples_to_show=3
+    num_samples_to_show=1
 ):
     """
     Evaluate a trained UNet model on a test dataset.

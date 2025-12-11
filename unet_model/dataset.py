@@ -10,29 +10,6 @@ import torchvision.transforms as transforms
 from dataset_normalizer.data_augmentation import elastic_deformation_3x3, random_rotate_shift, intensity_variation
 
 
-# ========== IMAGE NORMALIZATION FUNCTION =====================================
-def normalize_image(img_np):
-    """
-    ISBI-style normalization:
-    1. percentile clipping
-    2. centering (subtract mean)
-    3. normalization (divide by std)
-    """
-
-    # 1) intensity clipping
-    low = np.percentile(img_np, 0.5)
-    high = np.percentile(img_np, 99.5)
-    img_np = np.clip(img_np, low, high)
-
-    # 2) centering
-    img_np = img_np - img_np.mean()
-
-    # 3) normalization
-    img_np = img_np / (img_np.std() + 1e-8)
-
-    return img_np
-
-
 # ========== DATASET DEFINITION ================================================
 class SegmentationDataset(Dataset):
     def __init__(self, img2mask, train=True):
@@ -52,18 +29,17 @@ class SegmentationDataset(Dataset):
         # Retrieving images and masks
         image = Image.open(img_path).convert("L")
         mask = Image.open(mask_path).convert("L")
+
+        # Convert to numpy arrays
         image = np.array(image).astype(np.float32)
         mask = np.array(mask).astype(np.float32)
-
+        # Data augmentations
         if self.train:
             image, mask = elastic_deformation_3x3(image, mask)
             image, mask = random_rotate_shift(image, mask)
             image = intensity_variation(image)
 
-        # === Apply ISBI-style normalization ===
-        image = normalize_image(image)
-
-        # --- Resize mask to target size for UNet ---
+        # Resize mask to target size for UNet
         mask = cv2.resize(mask, (388, 388), interpolation=cv2.INTER_NEAREST)
 
         # Transformations to tensors and mask binarization
