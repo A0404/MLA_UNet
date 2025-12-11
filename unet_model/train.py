@@ -1,55 +1,162 @@
 import os
 import torch
-import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
 from unet_model.model import UNet
-from unet_model.dataset import dataset_loaders
 
 
-def train_model(
-    root_dir,
-    num_epochs,
-    learning_rate,
-    momentum,
-    batch_size,
-    model_save_path,
-    device
+# ========== EARLY STOPPING CLASS ==============================================
+class EarlyStoppingTrain:
+    def __init__(self, patience=50):
+        self.patience = patience
+        self.best_loss = float("inf")
+        self.counter = 0
+        self.stop = False
+
+    def step(self, loss):
+        if loss < self.best_loss:
+            self.best_loss = loss
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.stop = True
+
+
+# ========== SET SEED FUNCTION ================================================
+def set_seed(seed=42):
+    import random, numpy as np
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+# ========== TRAINING FUNCTION ================================================
+# --------- TRAINING FUNCTION FOR PAPER SETUP ------------------------------
+def train_model_paper(
+    model_dir,
+    model_save, 
+    train_ds,
+    device,
+    hyperparams=(1000, 1e-2, 0.99, 0.5, 1)
 ):
     """
     Train a UNet model on segmentation dataset.
 
     Args:
         root_dir: Path to directory containing training images and masks
-        num_epochs: Number of training epochs (default 30)
-        learning_rate: Learning rate for optimizer (default 3e-3)
+        num_epochs: Number of training epochs (default 1000)
+        learning_rate: Learning rate for optimizer (default 1e-2)
         momentum: Momentum for SGD optimizer (default 0.99)
-        batch_size: Batch size for DataLoader (default 4)
-        model_save_path: Path to save the trained model (default "unet_isbi.pth")
+        batch_size: Batch size for DataLoader (default 1)
+        model_save_path: Path to save the trained model
         device: torch device (default uses CUDA if available)
 
     Returns:
         tuple: (model, train_losses, val_losses)
     """
-    # Set device
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    set_seed(42)
 
-    # Create data loaders
-    train_loader, val_loader = dataset_loaders(
-        root_dir=root_dir,
-        batch_size=batch_size,
-        shuffle_train=True
-    )
+    # Unpack hyperparameters
+    num_epochs, learning_rate, momentum,  dropout_rate, batch_size = hyperparams
+
+    # Loaders
+    #num_workers = max(1, min(8, os.cpu_count() // 2))
+    num_workers = 0
+    train_loader = DataLoader(train_ds, batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+
+    # Create path
+    save_path = os.path.join(model_dir, model_save)
 
     # Initialize model, optimizer, loss
-    model = UNet().to(device)
+    model = UNet(dropout_rate=dropout_rate).to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
     criterion = torch.nn.CrossEntropyLoss()
 
     # Training loop
+    train_loader = train_loader
+    train_losses = []
+    print("Starting training...\n")
+
+    early_stop = EarlyStoppingTrain(patience=50)
+
+    for epoch in range(num_epochs):
+        print(f"Epoch {epoch + 1}/{num_epochs}")
+
+        # Training phase
+        model.train()
+        epoch_loss = 0
+        for imgs, msks in train_loader:
+            imgs = imgs.to(device)
+            msks = msks.to(device).long()
+
+            optimizer.zero_grad()                   # Zero gradients
+            preds = model(imgs)                     # Forward pass
+            loss = criterion(preds, msks)           # Compute loss
+            loss.backward()                         # Backward pass
+            optimizer.step()                        # Update weights   
+            epoch_loss += loss.item()               # Accumulate loss
+
+        epoch_loss /= len(train_loader)             # Average loss
+        train_losses.append(epoch_loss)
+
+        early_stop.step(epoch_loss)
+        if early_stop.stop:
+            print("Early stopping triggered (train loss convergence).")
+            break
+        print(f"  Train Loss: {epoch_loss:.4f}")
+
+    # Save model
+    torch.save(model.state_dict(), save_path)
+    print(f"\nModel saved as {model_save} in {model_dir}")
+
+    return (model, train_losses)
+
+
+# --------- TRAINING FUNCTION FOR PAPER SETUP ------------------------------
+def train_model_study(
+    model_dir,
+    model_save,
+    train_subset, 
+    val_subset,
+    hyperparams,
+    device,
+    resume=False,
+):
+    
+    # Unpack hyperparameters
+    num_epochs, learning_rate, momentum,  dropout_rate, batch_size = hyperparams
+
+    # Loaders
+    #num_workers = max(1, min(8, os.cpu_count() // 2))
+    num_workers = 0
+    train_loader = DataLoader(train_subset, batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_subset, batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+
+    # Create path
+    hyperparams_str = "_".join(str(h) for h in checkpoint['hyperparams'])
+    save_path = os.path.join(model_dir, f"{hyperparams_str}_{model_save}")
+
+    # Initialize model, optimizer, loss
+    if resume and os.path.exists(save_path):
+        checkpoint = torch.load(save_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        num_epochs, learning_rate, momentum,  dropout_rate, batch_size = checkpoint['hyperparams']
+    else:
+        model = UNet(dropout_rate=dropout_rate).to(device)
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
+    criterion = torch.nn.CrossEntropyLoss()
+
+    # Training loop
+    train_loader = train_loader
+    val_loader = val_loader
     train_losses = []
     val_losses = []
     print("Starting training...\n")
+
+    early_stop = EarlyStoppingTrain(patience=50)
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
@@ -61,14 +168,14 @@ def train_model(
             imgs = imgs.to(device)
             msks = msks.to(device).long()
 
-            optimizer.zero_grad()
-            preds = model(imgs)
-            loss = criterion(preds, msks)
-            loss.backward()
-            optimizer.step()
-            epoch_train_loss += loss.item()
+            optimizer.zero_grad()                   # Zero gradients
+            preds = model(imgs)                     # Forward pass
+            loss = criterion(preds, msks)           # Compute loss
+            loss.backward()                         # Backward pass
+            optimizer.step()                        # Update weights   
+            epoch_train_loss += loss.item()         # Accumulate loss
 
-        epoch_train_loss /= len(train_loader)
+        epoch_train_loss /= len(train_loader)       # Average loss
         train_losses.append(epoch_train_loss)
 
         # Validation phase
@@ -79,54 +186,28 @@ def train_model(
                 imgs = imgs.to(device)
                 msks = msks.to(device).long()
 
-                preds = model(imgs)
-                loss = criterion(preds, msks)
-                epoch_val_loss += loss.item()
+                preds = model(imgs)                 # Forward pass    
+                loss = criterion(preds, msks)       # Compute loss       
+                epoch_val_loss += loss.item()       # Accumulate loss
 
         epoch_val_loss /= len(val_loader)
         val_losses.append(epoch_val_loss)
 
+        early_stop.step(epoch_val_loss)
+        if early_stop.stop:
+            print("Early stopping triggered (train loss convergence).")
+            break
         print(f"  Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f}")
 
+    # Create checkpoint dict
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'hyperparams': (num_epochs, learning_rate, momentum, dropout_rate, train_loader.batch_size)
+    }    
+    
     # Save model
-    torch.save(model.state_dict(), model_save_path)
-    print(f"\nModel saved as {model_save_path}")
+    torch.save(checkpoint, save_path)
+    print(f"\nModel saved as {hyperparams_str}_{model_save} in {model_dir}")
 
     return (model, train_losses, val_losses)
-
-
-def plot_training_curves(train_losses, val_losses):
-    """Plot training and validation loss curves."""
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_losses, label="Train Loss")
-    plt.plot(val_losses, label="Val Loss")
-    plt.title("Training and Validation Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-
-def visualize_predictions(model, imgs, msks, device, num_samples=3):
-    """Visualize model predictions."""
-    model.eval()
-    with torch.no_grad():
-        preds = model(imgs.to(device))
-
-    fig, axes = plt.subplots(num_samples, 3, figsize=(12, 4 * num_samples))
-    for i in range(min(num_samples, len(imgs))):
-        axes[i, 0].imshow(imgs[i][0].cpu(), cmap="gray")
-        axes[i, 0].set_title("Image")
-        axes[i, 0].axis("off")
-
-        axes[i, 1].imshow(msks[i][0].cpu(), cmap="gray")
-        axes[i, 1].set_title("Mask")
-        axes[i, 1].axis("off")
-
-        axes[i, 2].imshow(preds[i].argmax(dim=0).cpu().detach(), cmap="gray")
-        axes[i, 2].set_title("Prediction")
-        axes[i, 2].axis("off")
-
-    plt.tight_layout()
-    plt.show()

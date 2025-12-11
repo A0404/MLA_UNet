@@ -1,2 +1,0 @@
-Architecture seule (non entraînée)	unet_model.py				Structure du réseau
-Modèle entraîné				unet_trained.pth / unet_trained_v1.h5	Version entraînée

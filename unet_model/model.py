@@ -5,6 +5,7 @@ import torch.nn as nn
 #  1. Fonction Center Crop 
 # --------------------------------------------------
 def center_crop(feature_map, target_tensor):
+    """ Perform edge clipping in a centered manner."""
     _, _, h, w = feature_map.shape
     _, _, th, tw = target_tensor.shape
 
@@ -16,8 +17,6 @@ def center_crop(feature_map, target_tensor):
 
     return feature_map[:, :, top:top+th, left:left+tw]
 
-# --------------------------------------------------
-### ------------- ###
 # --------------------------------------------------
 #  2. Base bloc : Double Convolution (without) padding)
 # --------------------------------------------------
@@ -34,18 +33,20 @@ class DoubleConv(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
+# --------------------------------------------------
 
 # --------------------------------------------------
 #  3. ENCODER 
 #     Each step = 2 conv + maxpool (except in case of a bottleneck)
 # --------------------------------------------------
 class Encoder(nn.Module):
-    def __init__(self):
+    def __init__(self, dropout_rate=0.5):
         super().__init__()
         self.enc1 = DoubleConv(1, 64)
         self.enc2 = DoubleConv(64, 128)
         self.enc3 = DoubleConv(128, 256)
         self.enc4 = DoubleConv(256, 512)
+        self.dropout = nn.Dropout2d(p=dropout_rate)       # Asking in data augmentation part
         self.bottleneck = DoubleConv(512, 1024)
         self.pool = nn.MaxPool2d(2)
 
@@ -62,9 +63,12 @@ class Encoder(nn.Module):
         s4 = self.enc4(x)
         x = self.pool(s4)
 
+        x = self.dropout(x)         # Asking in data augmentation part
+
         x = self.bottleneck(x)
 
         return x, [s1, s2, s3, s4]
+    
 # --------------------------------------------------
 #  4. DECODER 
 #     upsampling + cropping + concatenation + conv
@@ -110,15 +114,15 @@ class Decoder(nn.Module):
 
         return x
 
-
 # --------------------------------------------------
+
 # --------------------------------------------------
 #  5. U-NET MODEL
 # --------------------------------------------------
 class UNet(nn.Module):
-    def __init__(self, num_classes=2):
+    def __init__(self, num_classes=2, dropout_rate=0.5):
         super().__init__()
-        self.encoder = Encoder()
+        self.encoder = Encoder(dropout_rate=dropout_rate)
         self.decoder = Decoder()
         self.final_conv = nn.Conv2d(64, num_classes, kernel_size=1)
 
