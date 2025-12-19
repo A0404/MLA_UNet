@@ -8,15 +8,17 @@ import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as transforms
 from dataset_normalizer.data_augmentation import elastic_deformation_3x3, random_rotate_shift, intensity_variation
+from config import USE_DATA_AUG, USE_IGNORE_INDEX
 
 
 # ========== DATASET DEFINITION ================================================
 class SegmentationDataset(Dataset):
-    def __init__(self, img2mask, train=True):
+    def __init__(self, img2mask, train=True, use_ignore_index=False):
         self.img2mask = img2mask
         self.images = list(img2mask.keys())
         self.train = train
         self.to_tensor = transforms.ToTensor()
+        self.use_ignore_index = use_ignore_index
 
     def __len__(self):
         return len(self.images)
@@ -47,6 +49,9 @@ class SegmentationDataset(Dataset):
         mask = self.to_tensor(mask)
         mask = (mask > 0.5).long().squeeze(0)  # Binarize and remove channel dim
 
+        if self.use_ignore_index:
+            mask[mask == 255] = 255
+
         return (image, mask)
     
 
@@ -66,8 +71,8 @@ def dataset_ds(root_dir, ratio=0.8, seed=42):
     test_files = dict(img2mask[n:])
     
     #Datasets
-    train_ds = SegmentationDataset(train_files, train=True)
-    val_ds = SegmentationDataset(train_files, train=False)
-    test_ds = SegmentationDataset(test_files, train=False)
-    
+    train_ds = SegmentationDataset(train_files, train=USE_DATA_AUG, use_ignore_index=USE_IGNORE_INDEX)
+    val_ds = SegmentationDataset(train_files, train=False, use_ignore_index=USE_IGNORE_INDEX)
+    test_ds = SegmentationDataset(test_files, train=False, use_ignore_index=USE_IGNORE_INDEX)
+
     return (train_ds, val_ds,test_ds)

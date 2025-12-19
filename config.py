@@ -17,3 +17,10 @@ SAVED_MODELS_DIR       = os.path.join(PROJECT_ROOT, "saved_models")
 UNet_BUSI_benign       = "unet_BUSI_benign.pth"
 UNet_BUSI_malignant    = "unet_BUSI_malignant.pth"
 UNet_ISBI              = "unet_isbi.pth"
+
+# Flags pour tests
+USE_DATA_AUG = False         # activer / désactiver DA
+USE_IGNORE_INDEX = False     # activer / désactiver ignore label
+USE_LOSS_POND = False        # activer / désactiver pondération label
+
+DEBUG_VIS = True             # sauvegarde d’images

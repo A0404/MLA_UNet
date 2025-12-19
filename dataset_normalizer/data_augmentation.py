@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 from PIL import Image
 
-def elastic_deformation_3x3(image, mask, sigma=10, p=0.5):
+def elastic_deformation_3x3(image, mask, sigma=10, p=0.7):
     """
     Elastic deformation as described in the original UNet paper.
     
@@ -59,16 +59,16 @@ def elastic_deformation_3x3(image, mask, sigma=10, p=0.5):
     return img_deformed, mask_deformed
 
 
-def random_rotate_shift(image, mask, max_angle=15, max_shift=10, p=0.7):
+def random_rotate_shift(image, mask, max_angle=30, max_shift=5, p=0.8):
 
     # --- 1. Apply function with probability ---
     if np.random.rand() > p:
         return image, mask
     
     # --- 2. Sample random angle and shifts ---
-    angle = np.random.uniform(-max_angle, max_angle)
-    tx = np.random.uniform(-max_shift, max_shift)
-    ty = np.random.uniform(-max_shift, max_shift)
+    angle = np.random.normal(0, max_angle)
+    tx = np.random.normal(0, max_shift)
+    ty = np.random.normal(0, max_shift)
 
     from scipy.ndimage import rotate, shift
 

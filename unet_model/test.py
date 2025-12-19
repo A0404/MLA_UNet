@@ -53,6 +53,12 @@ def iou_score(pred, target, eps=1e-6):
     union = pred.sum() + target.sum() - intersection  # Compute union
     return (intersection + eps) / (union + eps)
 
+def dice(pred, target, eps=1e-6):
+    pred = pred.astype(bool)
+    target = target.astype(bool)
+    inter = (pred & target).sum()
+    return (2*inter + eps) / (pred.sum() + target.sum() + eps)
+
 
 # -------------------------------
 #   TEST FUNCTION
@@ -95,6 +101,9 @@ def test_model(
     rand_scores = []
     pix_scores = []
     iou_scores = []
+    dice_scores = []
+    precisions_scores = []
+    recalls_scores = []
 
     # -------------------------------
     #   Evaluation Loop
@@ -111,10 +120,20 @@ def test_model(
             mask_np = mask.cpu().numpy()[0]             # Ground truth mask as numpy array
 
             # Compute metrics
-            warp_scores.append(warping_error(pred_classes, mask_np))
-            rand_scores.append(rand_error(pred_classes, mask_np))
-            pix_scores.append(pixel_error(pred_classes, mask_np))
-            iou_scores.append(iou_score(pred_classes, mask_np))
+            valid_mask = mask_np != 255
+            warp_scores.append(warping_error(pred_classes[valid_mask], mask_np[valid_mask]))
+            rand_scores.append(rand_error(pred_classes[valid_mask], mask_np[valid_mask]))
+            pix_scores.append(pixel_error(pred_classes[valid_mask], mask_np[valid_mask]))
+            iou_scores.append(iou_score(pred_classes[valid_mask], mask_np[valid_mask]))
+            dice_scores.append(dice(pred_classes[valid_mask], mask_np[valid_mask]))
+            # Precision / Recall
+            TP = np.logical_and(pred_classes[valid_mask] == 1, mask_np[valid_mask] == 1).sum()
+            FP = np.logical_and(pred_classes[valid_mask] == 1, mask_np[valid_mask] == 0).sum()
+            FN = np.logical_and(pred_classes[valid_mask] == 0, mask_np[valid_mask] == 1).sum()
+            precision = TP / (TP + FP + 1e-6)
+            recall    = TP / (TP + FN + 1e-6)
+            precisions_scores.append(precision)
+            recalls_scores.append(recall)
 
             # Display some sample predictions
             if i < num_samples_to_show:
@@ -142,13 +161,19 @@ def test_model(
     mean_rand = np.mean(rand_scores)    # Average Rand error
     mean_pix = np.mean(pix_scores)      # Average pixel error
     mean_iou = np.mean(iou_scores)      # Average IoU
+    mean_dice = np.mean(dice_scores)    # Average dice
+    mean_precision = np.mean(precisions_scores)    # Average dice
+    mean_recall = np.mean(recalls_scores)    # Average dice
 
     # Print results
     print("\n======= TEST RESULTS =======")
-    print(f"Warping Error: {mean_warp:.4f}")
-    print(f"Rand Error:    {mean_rand:.4f}")
-    print(f"Pixel Error:   {mean_pix:.4f}")
-    print(f"IoU Score:     {mean_iou:.4f}")
+    print(f"Warping Error:      {mean_warp:.4f}")
+    print(f"Rand Error:         {mean_rand:.4f}")
+    print(f"Pixel Error:        {mean_pix:.4f}")
+    print(f"IoU Score:          {mean_iou:.4f}")
+    print(f"Dice Score:         {mean_dice:.4f}")
+    print(f"Precision Score:    {mean_precision:.4f}")
+    print(f"Recall Score:       {mean_recall:.4f}")
     print("============================")
 
-    return mean_warp, mean_rand, mean_pix, mean_iou
+    return mean_warp, mean_rand, mean_pix, mean_iou, mean_dice, mean_precision, mean_recall
