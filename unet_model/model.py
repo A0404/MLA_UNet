@@ -1,5 +1,17 @@
 import torch
 import torch.nn as nn
+import torch.nn.init as init
+
+# --------------------------------------------------
+#  INITIALISATION HE
+# --------------------------------------------------
+def init_weights_he(m):
+    """Initialisation He pour toutes les convolutions"""
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
 
 # --------------------------------------------------
 #  1. Fonction Center Crop 

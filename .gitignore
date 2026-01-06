@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+
+# Modèles PyTorch
+*.pth
+*.pt
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.bmp
+
+# Autres fichiers temporaires
+*.log
+*.tmp

@@ -2,16 +2,30 @@ import os
 from config import DEBUG_VIS, USE_DATA_AUG, USE_IGNORE_INDEX, USE_LOSS_POND
 import torch
 from torch.utils.data import DataLoader
-from unet_model.model import UNet
+from unet_model.model import UNet, init_weights_he
 from unet_model.debug import save_debug_image
 
 def log_mask_stats(mask):
     unique, counts = torch.unique(mask, return_counts=True)
     return {int(u): int(c) for u, c in zip(unique, counts)}
 
+# ========== WEIGHTED CROSS ENTROPY LOSS ======================================
+class UNetWeightedCELoss(torch.nn.Module):
+    def __init__(self, ignore_index=128):
+        super().__init__()
+        self.ce = torch.nn.CrossEntropyLoss(
+            ignore_index=ignore_index,
+            reduction="none"
+        )
+
+    def forward(self, logits, target, weight_map):
+        ce_loss = self.ce(logits, target)   # (B,H,W)
+        loss = ce_loss * weight_map
+        return loss.mean()
+
 # ========== EARLY STOPPING CLASS ==============================================
 class EarlyStoppingTrain:
-    def __init__(self, patience=50):
+    def __init__(self, patience=70):
         self.patience = patience
         self.best_loss = float("inf")
         self.counter = 0
@@ -43,6 +57,7 @@ def train_model_paper(
     model_dir,
     model_save, 
     train_ds,
+    val_ds,
     device,
     hyperparams=(1000, 1e-2, 0.99, 0.5, 1)
 ):
@@ -70,6 +85,15 @@ def train_model_paper(
     #num_workers = max(1, min(8, os.cpu_count() // 2))
     num_workers = 0
     train_loader = DataLoader(train_ds, batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+
+    # --- Après avoir créé le DataLoader ---
+    for imgs, msks, wmaps in train_loader:
+        print("Mask unique values:", torch.unique(msks))        # doit être [0,1]
+        print("Weight map stats: min", wmaps.min().item(),
+          "max", wmaps.max().item(),
+          "mean", wmaps.mean().item())                     # min/max doivent varier autour de 1
+        break  # juste le premier batch pour debug
 
     # Create path
     save_path = os.path.join(model_dir, model_save)
@@ -78,20 +102,23 @@ def train_model_paper(
 
     # Initialize model, optimizer, loss
     model = UNet(dropout_rate=dropout_rate).to(device)
+    model.apply(init_weights_he)
+
+    for name, param in model.named_parameters():
+        if 'weight' in name:
+            print(f"{name}: std={param.std().item():.4f}, mean={param.mean().item():.4f}")
+
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
     if USE_IGNORE_INDEX and not USE_LOSS_POND:
-        criterion = torch.nn.CrossEntropyLoss(ignore_index=255)
-    elif not USE_IGNORE_INDEX and USE_LOSS_POND:
-        class_weights = torch.tensor([1.0, 2.0]).to(device)         # Example weights for 2 classes
-        criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+        criterion = torch.nn.CrossEntropyLoss(ignore_index=128)
     elif USE_LOSS_POND and USE_IGNORE_INDEX:
-        class_weights = torch.tensor([1.0, 2.0]).to(device)         # Example weights for 2 classes
-        criterion = torch.nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
+        criterion = UNetWeightedCELoss()
     else:
         criterion = torch.nn.CrossEntropyLoss()
 
     # Training loop
     train_losses = []
+    val_losses = []
     print("Starting training...\n")
 
     early_stop = EarlyStoppingTrain(patience=50)
@@ -102,12 +129,24 @@ def train_model_paper(
         # Training phase
         model.train()
         epoch_loss = 0
-        for imgs, msks in train_loader:
+        for imgs, msks, wmaps in train_loader:
             imgs = imgs.to(device)
             msks = msks.to(device).long()
 
+            """
+            cell_ratio = (msks == 1).float().mean().item()
+            print(f"[DEBUG] Cell ratio in batch: {cell_ratio:.4f}")"""
+
+            wmaps = wmaps.to(device).float()
+    
             optimizer.zero_grad()                   # Zero gradients
             preds = model(imgs)                     # Forward pass
+
+            """
+            # Inspecter les activations
+            print("Logits stats: min", preds.min().item(),
+                "max", preds.max().item(),
+                "mean", preds.mean().item()) """
 
             # Debug: vérifier que preds ne contiennent pas d'explosions
             if torch.isnan(preds).any() or torch.isinf(preds).any():
@@ -115,9 +154,10 @@ def train_model_paper(
                 print("Preds stats:", preds.min().item(), preds.max().item(), preds.mean().item())
                 return None, None  # stop training
 
-            loss = criterion(preds, msks)           # Compute loss
+            loss = criterion(preds, msks, wmaps)           # Compute loss
             loss.backward()                         # Backward pass
 
+            """
             # Calcul de la norme totale des gradients
             total_norm = 0.0
             for p in model.parameters():
@@ -133,15 +173,34 @@ def train_model_paper(
             else:
                 #print(f"[DEBUG] Gradient norm {total_norm:.3f}, no clipping needed")
                 pass
-
+            """
+                
             optimizer.step()                        # Update weights   
             epoch_loss += loss.item()               # Accumulate loss
 
         epoch_loss /= len(train_loader)             # Average loss
         train_losses.append(epoch_loss)
 
+        # -----------------
+        # "Validation" phase (modele évalué sur le même dataset)
+        # -----------------
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for imgs, msks, wmaps in val_loader:  # même loader, juste eval
+                imgs = imgs.to(device)
+                msks = msks.to(device).long()
+                wmaps = wmaps.to(device).float()
+                preds = model(imgs)
+                loss = criterion(preds, msks, wmaps)
+                val_loss += loss.item()
+
+        val_loss /= len(val_loader)
+        val_losses.append(val_loss)
+        print(f"[VAL] Epoch {epoch + 1}, Pseudo-loss: {val_loss:.4f}")
+
         # ---------------- DEBUG ----------------
-        if epoch % 10 == 0:
+        if epoch % 1 == 0:
             print("Unique mask values:", torch.unique(msks))
             cell_ratio = (msks == 1).sum().item() / msks.numel()
             print(f"[DEBUG] Cell ratio (batch_size=1): {cell_ratio:.4f}")

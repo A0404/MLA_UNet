@@ -146,7 +146,7 @@ def test_model(
                 axes[1].set_title("Ground Truth")
                 axes[1].axis("off")
 
-                axes[2].imshow(pred_classes, cmap='gray')             # Predicted mask
+                axes[2].imshow(pred_classes*255, cmap='gray')             # Predicted mask
                 axes[2].set_title("Prediction")
                 axes[2].axis("off")
 
