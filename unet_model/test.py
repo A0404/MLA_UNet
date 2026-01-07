@@ -110,7 +110,7 @@ def test_model(
     # -------------------------------
 
     with torch.no_grad():                               # Disable gradient computation for evaluation
-        for i, (img, mask) in enumerate(test_loader):
+        for i, (img, mask, wmaps) in enumerate(test_loader):
             img = img.to(device)                        # Move input to device
             mask = mask.to(device).long()               # Convert mask to long type for classification
 

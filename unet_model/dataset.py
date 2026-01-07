@@ -63,7 +63,11 @@ def unet_weight_map(mask, w0=10, sigma=5):
     
     weight = np.sqrt(weight)         # ou weight**0.25 pour aplatir le max
     weight = 1 / (1 + weight)        # borne supérieure et préserve min
-    weight /= weight.mean()
+
+    mean = weight.mean()
+    if mean < 1e-6:
+        raise RuntimeError(f"Weight map mean too small: {mean}")
+    weight = weight / mean
     
     """
     # stats post-normalisation
@@ -135,33 +139,31 @@ class SegmentationDataset(Dataset):
         weight_map = torch.from_numpy(weight_map).float()  # convert to tensor float
 
         # --- Binarize mask for the network ---
-        mask = mask.astype(np.int32)
-        if self.use_ignore_index:
-            mask[mask == 128] = 128  # keep ignore index intact
-        mask[mask != 128] = (mask[mask != 128] == 255).astype(np.int32)  # binarize
+        mask = (mask == 255).astype(np.int32)  # binarize
         mask = torch.from_numpy(mask).long()  # convert to tensor long
 
         return (image, mask, weight_map)
     
 
 # ========== DATASET CREATION =====================================
-def dataset_ds(root_dir, ratio=0.8, seed=42):
-    # Combine image and mask paths
+def dataset_ds(root_dir, ratios=(0.7, 0.15, 0.15), seed=42):
     all_pngs = sorted(glob(os.path.join(root_dir, "*.png")))
     img2mask = [(p, p.replace(".png", "_combined_mask.png")) 
             for p in all_pngs if not p.endswith("_combined_mask.png")]
-    
+
     # 2. Shuffle (OBLIGATOIRE)
     random.seed(seed)
     random.shuffle(img2mask)
 
-    n = int(ratio*len(img2mask))
-    train_files = dict(img2mask[:n])
-    test_files = dict(img2mask[n:])
-    
-    #Datasets
-    train_ds = SegmentationDataset(train_files, train=USE_DATA_AUG, use_ignore_index=USE_IGNORE_INDEX)
-    val_ds = SegmentationDataset(train_files, train=False, use_ignore_index=USE_IGNORE_INDEX)
-    test_ds = SegmentationDataset(test_files, train=False, use_ignore_index=USE_IGNORE_INDEX)
+    n = len(img2mask)
+    n_train = int(ratios[0] * n)
+    n_val   = int(ratios[1] * n)
+    print(f"Dataset split: {n_train} train | {n_val} val | {n - n_train - n_val} test (total: {n})")
 
-    return (train_ds, val_ds, test_ds)
+    return {
+        "train": img2mask[:n_train],
+        "val":   img2mask[n_train:n_train+n_val],   # volontairement identique chez toi
+        "test":  img2mask[n_train+n_val:],
+        "seed":  seed,
+        "ratio": ratios
+    }

@@ -11,10 +11,9 @@ def log_mask_stats(mask):
 
 # ========== WEIGHTED CROSS ENTROPY LOSS ======================================
 class UNetWeightedCELoss(torch.nn.Module):
-    def __init__(self, ignore_index=128):
+    def __init__(self):
         super().__init__()
         self.ce = torch.nn.CrossEntropyLoss(
-            ignore_index=ignore_index,
             reduction="none"
         )
 
@@ -25,35 +24,81 @@ class UNetWeightedCELoss(torch.nn.Module):
 
 # ========== EARLY STOPPING CLASS ==============================================
 class EarlyStoppingTrain:
-    def __init__(self, patience=50, min_delta=1e-4):
+    def __init__(
+        self,
+        patience=80,
+        min_delta=5e-4,
+        ema_alpha=0.1,
+        warmup_epochs=20
+    ):
         """
-        patience  : nb d'epochs sans amélioration tolérées
-        min_delta : amélioration minimale considérée comme réelle
+        patience        : nb d'epochs sans amélioration tolérées
+        min_delta       : amélioration minimale significative du Dice
+        ema_alpha       : facteur de lissage EMA du Dice
+        warmup_epochs   : epochs minimales avant autorisation d'arrêt
         """
+
         self.patience = patience
         self.min_delta = min_delta
+        self.ema_alpha = ema_alpha
+        self.warmup_epochs = warmup_epochs
+
         self.best_dice = -float("inf")
+        self.best_recall_front = 0.0
+
+        self.dice_ema = None
         self.counter = 0
         self.stop = False
+        self.epoch = 0
 
     def step(self, dice_val, recall_front):
-        """
-        dice_val     : Dice moyen sur validation
-        recall_front : Recall frontière validation
-        """
+        self.epoch += 1
 
-        improved = dice_val > self.best_dice + self.min_delta
+        # -------------------------
+        # 1. Lissage EMA du Dice
+        # -------------------------
+        if self.dice_ema is None:
+            self.dice_ema = dice_val
+        else:
+            self.dice_ema = (
+                (1 - self.ema_alpha) * self.dice_ema
+                + self.ema_alpha * dice_val
+            )
+
+        # -------------------------
+        # 2. Détection d'amélioration
+        # -------------------------
+        dice_improved = self.dice_ema > self.best_dice + self.min_delta
+        recall_improved = recall_front > self.best_recall_front + 1e-3
+
+        improved = dice_improved or recall_improved
 
         if improved:
-            self.best_dice = dice_val
+            if dice_improved:
+                self.best_dice = self.dice_ema
+            if recall_improved:
+                self.best_recall_front = recall_front
             self.counter = 0
         else:
             self.counter += 1
 
-        # Sécurité : ne jamais stopper si frontières encore en train d'apparaître
+        # -------------------------
+        # 3. Sécurités critiques
+        # -------------------------
+
+        # a) Jamais d'arrêt pendant le warmup
+        if self.epoch < self.warmup_epochs:
+            self.counter = 0
+            return
+
+        # b) Jamais d'arrêt si frontières encore faibles
         if recall_front < 0.05:
             self.counter = 0
+            return
 
+        # -------------------------
+        # 4. Décision finale
+        # -------------------------
         if self.counter >= self.patience:
             self.stop = True
 
@@ -87,6 +132,44 @@ def recall_frontier(pred, target, eps=1e-6):
     fn = ((pred == 1) & (target == 0)).sum().float()
     return tp / (tp + fn + eps)
 
+# ========== CHECKPOINT ================================================
+def save_checkpoint(
+    path,
+    model,
+    optimizer,
+    epoch,
+    early_stop,
+    train_losses,
+    val_losses,
+    hyperparams
+):
+    checkpoint = {
+        "epoch": epoch,
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "early_stop": early_stop.__dict__,
+        "train_losses": train_losses,
+        "val_losses": val_losses,
+        "hyperparams": hyperparams
+    }
+    torch.save(checkpoint, path)
+
+def load_checkpoint(path, model, optimizer, early_stop, device):
+    checkpoint = torch.load(path, map_location=device)
+
+    model.load_state_dict(checkpoint["model_state"])
+    optimizer.load_state_dict(checkpoint["optimizer_state"])
+
+    early_stop.__dict__.update(checkpoint["early_stop"])
+
+    start_epoch = checkpoint["epoch"] + 1
+    train_losses = checkpoint["train_losses"]
+    val_losses = checkpoint["val_losses"]
+
+    print(f"[RESUME] Loaded checkpoint from {path} at epoch {start_epoch + 1}")
+
+    return start_epoch, train_losses, val_losses
+
 # ========== TRAINING FUNCTION ================================================
 # --------- TRAINING FUNCTION FOR PAPER SETUP ------------------------------
 def train_model_paper(
@@ -95,7 +178,8 @@ def train_model_paper(
     train_ds,
     val_ds,
     device,
-    hyperparams=(1000, 1e-2, 0.99, 0.5, 1)
+    hyperparams=(1000, 5e-3, 0.99, 0.5, 1),
+    resume = False
 ):
     """
     Train a UNet model on segmentation dataset.
@@ -103,7 +187,7 @@ def train_model_paper(
     Args:
         root_dir: Path to directory containing training images and masks
         num_epochs: Number of training epochs (default 1000)
-        learning_rate: Learning rate for optimizer (default 1e-2)
+        learning_rate: Learning rate for optimizer (default 5e-3)
         momentum: Momentum for SGD optimizer (default 0.99)
         batch_size: Batch size for DataLoader (default 1)
         model_save_path: Path to save the trained model
@@ -116,20 +200,6 @@ def train_model_paper(
 
     # Unpack hyperparameters
     num_epochs, learning_rate, momentum,  dropout_rate, batch_size = hyperparams
-
-    # Loaders
-    #num_workers = max(1, min(8, os.cpu_count() // 2))
-    num_workers = 0
-    train_loader = DataLoader(train_ds, batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-
-    # --- Après avoir créé le DataLoader ---
-    for imgs, msks, wmaps in train_loader:
-        print("Mask unique values:", torch.unique(msks))        # doit être [0,1]
-        print("Weight map stats: min", wmaps.min().item(),
-          "max", wmaps.max().item(),
-          "mean", wmaps.mean().item())                     # min/max doivent varier autour de 1
-        break  # juste le premier batch pour debug
 
     # Create path
     save_path = os.path.join(model_dir, model_save)
@@ -145,21 +215,47 @@ def train_model_paper(
             print(f"{name}: std={param.std().item():.4f}, mean={param.mean().item():.4f}")
 
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
-    if USE_IGNORE_INDEX and not USE_LOSS_POND:
-        criterion = torch.nn.CrossEntropyLoss(ignore_index=128)
-    elif USE_LOSS_POND and USE_IGNORE_INDEX:
-        criterion = UNetWeightedCELoss()
-    else:
-        criterion = torch.nn.CrossEntropyLoss()
+    criterion = UNetWeightedCELoss()
 
-    # Training loop
+    early_stop = EarlyStoppingTrain(
+        patience=80,
+        min_delta=5e-4,
+        ema_alpha=0.1,
+        warmup_epochs=20
+    )
+
+    # Initialize variables
     train_losses = []
     val_losses = []
+    start_epoch = 0
+
+    if resume and os.path.exists(save_path):
+        start_epoch, train_losses, val_losses = load_checkpoint(
+            save_path,
+            model,
+            optimizer,
+            early_stop,
+            device
+        )
+
+    # Loaders
+    #num_workers = max(1, min(8, os.cpu_count() // 2))
+    num_workers = 0
+    train_loader = DataLoader(train_ds, batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+
+    # --- Après avoir créé le DataLoader ---
+    for imgs, msks, wmaps in train_loader:
+        print("Mask unique values:", torch.unique(msks))        # doit être [0,1]
+        print("Weight map stats: min", wmaps.min().item(),
+          "max", wmaps.max().item(),
+          "mean", wmaps.mean().item())                     # min/max doivent varier autour de 1
+        break  # juste le premier batch pour debug
+
+    # Training loop
     print("Starting training...\n")
 
-    early_stop = EarlyStoppingTrain(patience=60)
-
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
 
         # Training phase
@@ -174,9 +270,25 @@ def train_model_paper(
             print(f"[DEBUG] Cell ratio in batch: {cell_ratio:.4f}")"""
 
             wmaps = wmaps.to(device).float()
+
+            # --- SANITY CHECK INPUTS ---
+            if torch.isnan(imgs).any() or torch.isinf(imgs).any():
+                raise RuntimeError("NaN/Inf detected in INPUT IMAGES")
+
+            if torch.isnan(msks).any() or torch.isinf(msks).any():
+                raise RuntimeError("NaN/Inf detected in MASKS")
+
+            if torch.isnan(wmaps).any() or torch.isinf(wmaps).any():
+                raise RuntimeError("NaN/Inf detected in WEIGHT MAPS")
+
+            if wmaps.min() <= 0:
+                print("[WARNING] weight map has non-positive values:", wmaps.min().item())
+
+            #print("image :",imgs,"mask", msks, "weight_map", wmaps)
     
             optimizer.zero_grad()                   # Zero gradients
-            preds = model(imgs)                     # Forward pass
+            preds = model(imgs / 255.0)             # Forward pass
+            #print("preds:", preds)
 
             """
             # Inspecter les activations
@@ -186,7 +298,7 @@ def train_model_paper(
 
             # Debug: vérifier que preds ne contiennent pas d'explosions
             if torch.isnan(preds).any() or torch.isinf(preds).any():
-                print(f"[WARNING] NaN or Inf detected in preds at epoch {epoch}. Stopping training.")
+                print(f"[WARNING] NaN or Inf detected in preds at epoch {epoch + 1}. Stopping training.")
                 print("Preds stats:", preds.min().item(), preds.max().item(), preds.mean().item())
                 return None, None  # stop training
 
@@ -231,7 +343,20 @@ def train_model_paper(
                 msks = msks.to(device).long()
                 wmaps = wmaps.to(device).float()
 
-                preds = model(imgs)
+                # --- SANITY CHECK INPUTS ---
+                if torch.isnan(imgs).any() or torch.isinf(imgs).any():
+                    raise RuntimeError("NaN/Inf detected in INPUT IMAGES")
+
+                if torch.isnan(msks).any() or torch.isinf(msks).any():
+                    raise RuntimeError("NaN/Inf detected in MASKS")
+
+                if torch.isnan(wmaps).any() or torch.isinf(wmaps).any():
+                    raise RuntimeError("NaN/Inf detected in WEIGHT MAPS")
+
+                if wmaps.min() <= 0:
+                    print("[WARNING] weight map has non-positive values:", wmaps.min().item())
+
+                preds = model(imgs / 255.0)             # Forward pass
                 loss = criterion(preds, msks, wmaps)
                 val_loss += loss.item()
 
@@ -253,7 +378,6 @@ def train_model_paper(
         frontier_frac_mean = frontier_frac_sum / len(val_loader)
 
         val_losses.append(val_loss)
-        print(f"[VAL] Epoch {epoch + 1}, Pseudo-loss: {val_loss:.4f}")
         print(
             f"[VAL] "
             f"Loss: {val_loss:.4f} | "
@@ -285,9 +409,23 @@ def train_model_paper(
                 pred_image = 255 - pred_image
                 
             if DEBUG_VIS:
-                save_debug_image(imgs[0], msks[0], pred_image[0], os.path.join(out_dir, f"debug_DA_{USE_DATA_AUG}_INDEX_{USE_IGNORE_INDEX}_epoch_{epoch}.png"))
+                save_debug_image(imgs[0], msks[0], pred_image[0], os.path.join(out_dir, f"{model_save}_epoch_{epoch + 1}.png"))
         # --------------------------------------
 
+        # ---------------- CHECKPOINTING ----------------
+        save_checkpoint(
+            save_path,
+            model,
+            optimizer,
+            epoch,
+            early_stop,
+            train_losses,
+            val_losses,
+            hyperparams
+        )
+        print(f"\nModel saved as {model_save} in {model_dir} with checkpoint at epoch {epoch + 1}\n")
+
+        # ---------------- EARLY STOPPING ----------------
         early_stop.step(dice_mean, recall_front_mean)
         if early_stop.stop:
             print(
@@ -298,9 +436,18 @@ def train_model_paper(
 
         print(f"  Train Loss: {epoch_loss:.4f}")
 
-    # Save model
-    torch.save(model.state_dict(), save_path)
-    print(f"\nModel saved as {model_save} in {model_dir}")
+    # Final save
+    save_checkpoint(
+                save_path,
+                model,
+                optimizer,
+                epoch,
+                early_stop,
+                train_losses,
+                val_losses,
+                hyperparams
+            )
+    print(f"\nModel saved as {model_save} in {model_dir} with checkpoint at epoch {epoch + 1}\n")
 
     return (model, train_losses)
 
