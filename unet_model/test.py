@@ -91,7 +91,8 @@ def test_model(
     
     # Load model and move it to the device
     model = UNet().to(device)
-    model.load_state_dict(torch.load(save_path, map_location=device))
+    checkpoint = torch.load(save_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state"])
     model.eval()                        # Set to evaluation mode (disables dropout, batchnorm, etc.)
 
     print("\nModel loaded. Starting evaluation...\n")
@@ -119,10 +120,11 @@ def test_model(
             pred_classes = torch.argmax(pred, dim=1).cpu().numpy()[0]  # Predicted class per pixel
             mask_np = mask.cpu().numpy()[0]             # Ground truth mask as numpy array
 
+            """
             # Inspecter les activations
             print("Logits stats: min", pred.min().item(),
                 "max", pred.max().item(),
-                "mean", pred.mean().item())
+                "mean", pred.mean().item()) """
 
             # Compute metrics
             valid_mask = mask_np != 255

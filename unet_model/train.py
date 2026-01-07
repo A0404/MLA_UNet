@@ -1,4 +1,5 @@
 import os
+import random
 from config import DEBUG_VIS, USE_DATA_AUG, USE_IGNORE_INDEX, USE_LOSS_POND
 import torch
 from torch.utils.data import DataLoader
@@ -23,82 +24,47 @@ class UNetWeightedCELoss(torch.nn.Module):
         return loss.mean()
 
 # ========== EARLY STOPPING CLASS ==============================================
-class EarlyStoppingTrain:
+class EarlyStoppingValLoss:
     def __init__(
         self,
-        patience=80,
-        min_delta=5e-4,
-        ema_alpha=0.1,
+        patience=10,
+        min_delta=1e-4,
         warmup_epochs=20
     ):
         """
-        patience        : nb d'epochs sans amélioration tolérées
-        min_delta       : amélioration minimale significative du Dice
-        ema_alpha       : facteur de lissage EMA du Dice
+        Early stopping basé UNIQUEMENT sur la validation loss.
+
+        patience        : nombre d'epochs sans amélioration tolérées
+        min_delta       : amélioration minimale significative de la val loss
         warmup_epochs   : epochs minimales avant autorisation d'arrêt
         """
 
         self.patience = patience
         self.min_delta = min_delta
-        self.ema_alpha = ema_alpha
         self.warmup_epochs = warmup_epochs
 
-        self.best_dice = -float("inf")
-        self.best_recall_front = 0.0
-
-        self.dice_ema = None
+        self.best_val_loss = float("inf")
         self.counter = 0
         self.stop = False
         self.epoch = 0
 
-    def step(self, dice_val, recall_front):
+    def step(self, val_loss):
         self.epoch += 1
 
-        # -------------------------
-        # 1. Lissage EMA du Dice
-        # -------------------------
-        if self.dice_ema is None:
-            self.dice_ema = dice_val
-        else:
-            self.dice_ema = (
-                (1 - self.ema_alpha) * self.dice_ema
-                + self.ema_alpha * dice_val
-            )
+        # 1. Warmup : on n'arrête jamais trop tôt
+        if self.epoch <= self.warmup_epochs:
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+            return
 
-        # -------------------------
-        # 2. Détection d'amélioration
-        # -------------------------
-        dice_improved = self.dice_ema > self.best_dice + self.min_delta
-        recall_improved = recall_front > self.best_recall_front + 1e-3
-
-        improved = dice_improved or recall_improved
-
-        if improved:
-            if dice_improved:
-                self.best_dice = self.dice_ema
-            if recall_improved:
-                self.best_recall_front = recall_front
+        # 2. Amélioration significative ?
+        if val_loss < self.best_val_loss - self.min_delta:
+            self.best_val_loss = val_loss
             self.counter = 0
         else:
             self.counter += 1
 
-        # -------------------------
-        # 3. Sécurités critiques
-        # -------------------------
-
-        # a) Jamais d'arrêt pendant le warmup
-        if self.epoch < self.warmup_epochs:
-            self.counter = 0
-            return
-
-        # b) Jamais d'arrêt si frontières encore faibles
-        if recall_front < 0.05:
-            self.counter = 0
-            return
-
-        # -------------------------
-        # 4. Décision finale
-        # -------------------------
+        # 3. Décision d'arrêt
         if self.counter >= self.patience:
             self.stop = True
 
@@ -217,10 +183,9 @@ def train_model_paper(
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
     criterion = UNetWeightedCELoss()
 
-    early_stop = EarlyStoppingTrain(
-        patience=80,
-        min_delta=5e-4,
-        ema_alpha=0.1,
+    early_stop = EarlyStoppingValLoss(
+        patience=10,
+        min_delta=1e-4,
         warmup_epochs=20
     )
 
@@ -287,7 +252,7 @@ def train_model_paper(
             #print("image :",imgs,"mask", msks, "weight_map", wmaps)
     
             optimizer.zero_grad()                   # Zero gradients
-            preds = model(imgs / 255.0)             # Forward pass
+            preds = model(imgs)             # Forward pass
             #print("preds:", preds)
 
             """
@@ -356,7 +321,7 @@ def train_model_paper(
                 if wmaps.min() <= 0:
                     print("[WARNING] weight map has non-positive values:", wmaps.min().item())
 
-                preds = model(imgs / 255.0)             # Forward pass
+                preds = model(imgs)             # Forward pass
                 loss = criterion(preds, msks, wmaps)
                 val_loss += loss.item()
 
@@ -426,15 +391,13 @@ def train_model_paper(
         print(f"\nModel saved as {model_save} in {model_dir} with checkpoint at epoch {epoch + 1}\n")
 
         # ---------------- EARLY STOPPING ----------------
-        early_stop.step(dice_mean, recall_front_mean)
+        early_stop.step(val_loss)
         if early_stop.stop:
             print(
-                f"[EARLY STOP] Convergence atteinte | "
-                f"Best Dice: {early_stop.best_dice:.4f}"
+                f"[EARLY STOP] Validation loss n'améliore plus "
+                f"(best = {early_stop.best_val_loss:.4f})"
             )
             break
-
-        print(f"  Train Loss: {epoch_loss:.4f}")
 
     # Final save
     save_checkpoint(
@@ -449,7 +412,7 @@ def train_model_paper(
             )
     print(f"\nModel saved as {model_save} in {model_dir} with checkpoint at epoch {epoch + 1}\n")
 
-    return (model, train_losses)
+    return (model, train_losses, val_losses)
 
 
 # --------- TRAINING FUNCTION FOR PAPER SETUP ------------------------------
@@ -492,7 +455,11 @@ def train_model_study(
     val_losses = []
     print("Starting training...\n")
 
-    early_stop = EarlyStoppingTrain(patience=50)
+    early_stop = EarlyStoppingValLoss(
+        patience=10,
+        min_delta=1e-4,
+        warmup_epochs=20
+    )
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
@@ -531,9 +498,11 @@ def train_model_study(
 
         early_stop.step(epoch_val_loss)
         if early_stop.stop:
-            print("Early stopping triggered (train loss convergence).")
+            print(
+                f"[EARLY STOP] Validation loss n'améliore plus "
+                f"(best = {early_stop.best_val_loss:.4f})"
+            )
             break
-        print(f"  Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f}")
 
     # Create checkpoint dict
     checkpoint = {

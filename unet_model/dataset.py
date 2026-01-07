@@ -129,7 +129,7 @@ class SegmentationDataset(Dataset):
         mask = center_crop_img(mask, (388, 388))
 
         # Transformations to tensors and mask binarization
-        image = self.to_tensor(image).float()
+        image = self.to_tensor(image / 255.0).float()
 
         # --- Prepare mask for weight map generation ---
         mask_np_for_wmap = mask.copy()  # copy original mask as numpy array
