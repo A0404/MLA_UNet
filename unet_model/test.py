@@ -119,6 +119,11 @@ def test_model(
             pred_classes = torch.argmax(pred, dim=1).cpu().numpy()[0]  # Predicted class per pixel
             mask_np = mask.cpu().numpy()[0]             # Ground truth mask as numpy array
 
+            # Inspecter les activations
+            print("Logits stats: min", pred.min().item(),
+                "max", pred.max().item(),
+                "mean", pred.mean().item())
+
             # Compute metrics
             valid_mask = mask_np != 255
             warp_scores.append(warping_error(pred_classes[valid_mask], mask_np[valid_mask]))

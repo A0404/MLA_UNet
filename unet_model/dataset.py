@@ -11,6 +11,23 @@ from scipy.ndimage import distance_transform_edt
 from dataset_normalizer.data_augmentation import elastic_deformation_3x3, random_rotate_shift, intensity_variation
 from config import USE_DATA_AUG, USE_IGNORE_INDEX, USE_LOSS_POND
 
+# --------------------------------------------------
+#  1. Fonction Center Crop Image
+# --------------------------------------------------
+def center_crop_img(feature_map, target_tensor_shape):
+    """ Perform edge clipping in a centered manner."""
+    h, w = feature_map.shape
+    th, tw = target_tensor_shape
+
+    delta_h = h - th
+    delta_w = w - tw
+
+    top = delta_h // 2
+    left = delta_w // 2
+
+    return feature_map[top:top+th, left:left+tw]
+
+
 # ========== WEIGHTED CROSS ENTROPY LOSS ======================================
 def unet_weight_map(mask, w0=10, sigma=5):
     """
@@ -43,8 +60,33 @@ def unet_weight_map(mask, w0=10, sigma=5):
     weight = w_c + w0 * np.exp(-((d1 + d2)**2) / (2 * sigma**2))
     weight = weight.astype(np.float32)
 
-    weight_map = np.clip(weight, 1e-2, 1000)    # clip extreme values
+    
+    weight = np.sqrt(weight)         # ou weight**0.25 pour aplatir le max
+    weight = 1 / (1 + weight)        # borne supérieure et préserve min
     weight /= weight.mean()
+    
+    """
+    # stats post-normalisation
+    stats = {
+        "min": weight.min(),
+        "max": weight.max(),
+        "mean": weight.mean(),
+        "p0.1": np.percentile(weight, 0.1),
+        "p99.9": np.percentile(weight, 99.9)
+    }
+    print("Weight map stats after mean:", stats)"""
+    
+    weight_map = np.clip(weight, 0.1, 5.0)      # clip extreme values
+    """
+    # stats post-normalisation
+    stats_2 = {
+        "min": weight_map.min(),
+        "max": weight_map.max(),
+        "mean": weight_map.mean(),
+        "p0.1": np.percentile(weight_map, 0.1),
+        "p99.9": np.percentile(weight_map, 99.9)
+    }
+    print("Weight map stats after mean and clip:", stats_2)"""
 
     return weight_map
 
@@ -80,7 +122,7 @@ class SegmentationDataset(Dataset):
             image = intensity_variation(image)
 
         # Resize mask to target size for UNet
-        mask = cv2.resize(mask, (388, 388), interpolation=cv2.INTER_NEAREST)
+        mask = center_crop_img(mask, (388, 388))
 
         # Transformations to tensors and mask binarization
         image = self.to_tensor(image).float()

@@ -25,20 +25,37 @@ class UNetWeightedCELoss(torch.nn.Module):
 
 # ========== EARLY STOPPING CLASS ==============================================
 class EarlyStoppingTrain:
-    def __init__(self, patience=70):
+    def __init__(self, patience=50, min_delta=1e-4):
+        """
+        patience  : nb d'epochs sans amélioration tolérées
+        min_delta : amélioration minimale considérée comme réelle
+        """
         self.patience = patience
-        self.best_loss = float("inf")
+        self.min_delta = min_delta
+        self.best_dice = -float("inf")
         self.counter = 0
         self.stop = False
 
-    def step(self, loss):
-        if loss < self.best_loss:
-            self.best_loss = loss
+    def step(self, dice_val, recall_front):
+        """
+        dice_val     : Dice moyen sur validation
+        recall_front : Recall frontière validation
+        """
+
+        improved = dice_val > self.best_dice + self.min_delta
+
+        if improved:
+            self.best_dice = dice_val
             self.counter = 0
         else:
             self.counter += 1
-            if self.counter >= self.patience:
-                self.stop = True
+
+        # Sécurité : ne jamais stopper si frontières encore en train d'apparaître
+        if recall_front < 0.05:
+            self.counter = 0
+
+        if self.counter >= self.patience:
+            self.stop = True
 
 
 # ========== SET SEED FUNCTION ================================================
@@ -50,6 +67,25 @@ def set_seed(seed=42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+
+def dice_coefficient(pred, target, eps=1e-6):
+    """
+    Dice pour segmentation binaire (classe 1)
+    pred, target : (H, W) en {0,1}
+    """
+    pred = pred.float()
+    target = target.float()
+    inter = (pred * target).sum()
+    return (2 * inter + eps) / (pred.sum() + target.sum() + eps)
+
+
+def recall_frontier(pred, target, eps=1e-6):
+    """
+    Recall sur la classe frontière (supposée = 0)
+    """
+    tp = ((pred == 0) & (target == 0)).sum().float()
+    fn = ((pred == 1) & (target == 0)).sum().float()
+    return tp / (tp + fn + eps)
 
 # ========== TRAINING FUNCTION ================================================
 # --------- TRAINING FUNCTION FOR PAPER SETUP ------------------------------
@@ -121,7 +157,7 @@ def train_model_paper(
     val_losses = []
     print("Starting training...\n")
 
-    early_stop = EarlyStoppingTrain(patience=50)
+    early_stop = EarlyStoppingTrain(patience=60)
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
@@ -146,7 +182,7 @@ def train_model_paper(
             # Inspecter les activations
             print("Logits stats: min", preds.min().item(),
                 "max", preds.max().item(),
-                "mean", preds.mean().item()) """
+                "mean", preds.mean().item())"""
 
             # Debug: vérifier que preds ne contiennent pas d'explosions
             if torch.isnan(preds).any() or torch.isinf(preds).any():
@@ -186,35 +222,80 @@ def train_model_paper(
         # -----------------
         model.eval()
         val_loss = 0
+        dice_sum = 0.0
+        recall_front_sum = 0.0
+        frontier_frac_sum = 0.0
         with torch.no_grad():
             for imgs, msks, wmaps in val_loader:  # même loader, juste eval
                 imgs = imgs.to(device)
                 msks = msks.to(device).long()
                 wmaps = wmaps.to(device).float()
+
                 preds = model(imgs)
                 loss = criterion(preds, msks, wmaps)
                 val_loss += loss.item()
 
+                # --- Predictions binaires ---
+                pred_classes = torch.argmax(preds, dim=1)
+
+                # --- Métriques ---
+                dice = dice_coefficient(pred_classes, msks)
+                recall_f = recall_frontier(pred_classes, msks)
+                frontier_frac = (pred_classes == 0).float().mean()
+
+                dice_sum += dice.item()
+                recall_front_sum += recall_f.item()
+                frontier_frac_sum += frontier_frac.item()
+    
         val_loss /= len(val_loader)
+        dice_mean = dice_sum / len(val_loader)
+        recall_front_mean = recall_front_sum / len(val_loader)
+        frontier_frac_mean = frontier_frac_sum / len(val_loader)
+
         val_losses.append(val_loss)
         print(f"[VAL] Epoch {epoch + 1}, Pseudo-loss: {val_loss:.4f}")
+        print(
+            f"[VAL] "
+            f"Loss: {val_loss:.4f} | "
+            f"Dice(cell): {dice_mean:.3f} | "
+            f"Recall(front): {recall_front_mean:.3f} | "
+            f"Frontier frac: {frontier_frac_mean:.3f}"
+        )
 
         # ---------------- DEBUG ----------------
         if epoch % 1 == 0:
-            print("Unique mask values:", torch.unique(msks))
+            #print("Unique mask values:", torch.unique(msks))
             cell_ratio = (msks == 1).sum().item() / msks.numel()
-            print(f"[DEBUG] Cell ratio (batch_size=1): {cell_ratio:.4f}")
-            print("[DEBUG] Mask stats:", log_mask_stats(msks))
+            #print(f"[DEBUG] Cell ratio (batch_size=1): {cell_ratio:.4f}")
+            #print("[DEBUG] Mask stats:", log_mask_stats(msks))
+
+            # Probabilités brutes
+            with torch.no_grad():
+                probs = torch.softmax(preds, dim=1)  # shape [B, C, H, W]
+                # Exemple pour le premier batch
+                probs_img = probs[0].detach().cpu().numpy()  # shape [C, H, W]
+                #print("Probs shape:", probs_img.shape)
+                print("Probs min/max per class:", probs_img.min(axis=(1,2)), probs_img.max(axis=(1,2)))
+
             pred = torch.argmax(preds, dim=1)
             print("Unique predicted classes:", torch.unique(pred))
+            
+            pred_image = pred.float() * 255
+            if torch.mean(pred_image) < 128:  # plus de pixels blancs que noirs
+                pred_image = 255 - pred_image
+                
             if DEBUG_VIS:
-                save_debug_image(imgs[0], msks[0], pred[0], os.path.join(out_dir, f"debug_DA_{USE_DATA_AUG}_INDEX_{USE_IGNORE_INDEX}_epoch_{epoch}.png"))
+                save_debug_image(imgs[0], msks[0], pred_image[0], os.path.join(out_dir, f"debug_DA_{USE_DATA_AUG}_INDEX_{USE_IGNORE_INDEX}_epoch_{epoch}.png"))
         # --------------------------------------
 
-        early_stop.step(epoch_loss)
+        early_stop.step(dice_mean, recall_front_mean)
         if early_stop.stop:
-            print("Early stopping triggered (train loss convergence).")
+            print(
+                f"[EARLY STOP] Convergence atteinte | "
+                f"Best Dice: {early_stop.best_dice:.4f}"
+            )
             break
+
         print(f"  Train Loss: {epoch_loss:.4f}")
 
     # Save model
