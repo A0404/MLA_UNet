@@ -1,14 +1,46 @@
 import os
-import random
-from config import DEBUG_VIS, USE_DATA_AUG, USE_IGNORE_INDEX, USE_LOSS_POND
+import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import DataLoader
 from unet_model.model import UNet, init_weights_he
-from unet_model.debug import save_debug_image
+from config import DEBUG_VIS
 
+
+# ========== LOG MASK STATS ======================================
 def log_mask_stats(mask):
     unique, counts = torch.unique(mask, return_counts=True)
     return {int(u): int(c) for u, c in zip(unique, counts)}
+
+
+# ========== DEBUG IMAGE ======================================
+def save_debug_image(img, mask, pred, out_path):
+    """
+    img: Tensor [1,H,W] or [H,W]
+    mask: Tensor [H,W]
+    pred: Tensor [H,W]
+    """
+
+    img = img.squeeze().detach().cpu().numpy()
+    mask = mask.detach().cpu().numpy()
+    pred = pred.detach().cpu().numpy()
+
+    fig, ax = plt.subplots(1, 3, figsize=(12,4))
+
+    ax[0].imshow(img, cmap='gray')
+    ax[0].set_title("Image")
+    ax[1].imshow(mask, cmap='gray')
+    ax[1].set_title("GT Mask")
+    ax[2].imshow(pred, cmap='gray')
+    ax[2].set_title("Prediction")
+
+    for a in ax:
+        a.axis("off")
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
 
 # ========== WEIGHTED CROSS ENTROPY LOSS ======================================
 class UNetWeightedCELoss(torch.nn.Module):
@@ -23,11 +55,12 @@ class UNetWeightedCELoss(torch.nn.Module):
         loss = ce_loss * weight_map
         return loss.mean()
 
+
 # ========== EARLY STOPPING CLASS ==============================================
 class EarlyStoppingValLoss:
     def __init__(
         self,
-        patience=10,
+        patience=20,
         min_delta=1e-4,
         warmup_epochs=20
     ):
@@ -79,6 +112,7 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 
+# ========== METRICS ================================================
 def dice_coefficient(pred, target, eps=1e-6):
     """
     Dice pour segmentation binaire (classe 1)
@@ -97,6 +131,7 @@ def recall_frontier(pred, target, eps=1e-6):
     tp = ((pred == 0) & (target == 0)).sum().float()
     fn = ((pred == 1) & (target == 0)).sum().float()
     return tp / (tp + fn + eps)
+
 
 # ========== CHECKPOINT ================================================
 def save_checkpoint(
@@ -119,33 +154,65 @@ def save_checkpoint(
         "hyperparams": hyperparams
     }
     torch.save(checkpoint, path)
+    
+def load_or_initialize(
+    save_path,
+    device,
+    hyperparams,
+    resume=False
+):
+    # Load hyperparams if resume=True and file exists
+    if resume and os.path.exists(save_path):
+        ckpt = torch.load(save_path, map_location=device)
+        hyperparams = ckpt["hyperparams"]
 
-def load_checkpoint(path, model, optimizer, early_stop, device):
-    checkpoint = torch.load(path, map_location=device)
+    num_epochs, lr, momentum, dropout_rate, batch_size = hyperparams
+    
+    # Initialize all components
+    model = UNet(dropout_rate=dropout_rate).to(device)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum)
 
-    model.load_state_dict(checkpoint["model_state"])
-    optimizer.load_state_dict(checkpoint["optimizer_state"])
+    start_epoch = 0
+    train_losses, val_losses = [], []
 
-    early_stop.__dict__.update(checkpoint["early_stop"])
+    early_stop = EarlyStoppingValLoss()
 
-    start_epoch = checkpoint["epoch"] + 1
-    train_losses = checkpoint["train_losses"]
-    val_losses = checkpoint["val_losses"]
+    # Load checkpoint if resume=True
+    if resume and os.path.exists(save_path):
+        model.load_state_dict(ckpt["model_state"])
+        optimizer.load_state_dict(ckpt["optimizer_state"])
+        early_stop.__dict__.update(ckpt["early_stop"])
 
-    print(f"[RESUME] Loaded checkpoint from {path} at epoch {start_epoch + 1}")
+        start_epoch = ckpt["epoch"] + 1
+        train_losses = ckpt["train_losses"]
+        val_losses = ckpt["val_losses"]
 
-    return start_epoch, train_losses, val_losses
+        print(f"[RESUME] Loaded checkpoint at epoch {start_epoch}")
+    # Otherwise, initialize weights
+    else:
+        model.apply(init_weights_he)
+
+    return (
+        model,
+        optimizer,
+        early_stop,
+        start_epoch,
+        num_epochs,
+        batch_size,
+        train_losses,
+        val_losses
+    )
+
 
 # ========== TRAINING FUNCTION ================================================
-# --------- TRAINING FUNCTION FOR PAPER SETUP ------------------------------
-def train_model_paper(
+def train_model(
     model_dir,
     model_save, 
     train_ds,
     val_ds,
     device,
-    hyperparams=(1000, 5e-3, 0.99, 0.5, 1),
-    resume = False
+    resume = False,
+    hyperparams=(1000, 1e-3, 0.99, 0.2, 1)
 ):
     """
     Train a UNet model on segmentation dataset.
@@ -164,58 +231,23 @@ def train_model_paper(
     """
     set_seed(42)
 
-    # Unpack hyperparameters
-    num_epochs, learning_rate, momentum,  dropout_rate, batch_size = hyperparams
-
     # Create path
     save_path = os.path.join(model_dir, model_save)
     out_dir = "debug_images"
     os.makedirs(out_dir, exist_ok=True)
 
-    # Initialize model, optimizer, loss
-    model = UNet(dropout_rate=dropout_rate).to(device)
-    model.apply(init_weights_he)
-
-    for name, param in model.named_parameters():
-        if 'weight' in name:
-            print(f"{name}: std={param.std().item():.4f}, mean={param.mean().item():.4f}")
-
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
-    criterion = UNetWeightedCELoss()
-
-    early_stop = EarlyStoppingValLoss(
-        patience=10,
-        min_delta=1e-4,
-        warmup_epochs=20
-    )
-
-    # Initialize variables
-    train_losses = []
-    val_losses = []
-    start_epoch = 0
-
-    if resume and os.path.exists(save_path):
-        start_epoch, train_losses, val_losses = load_checkpoint(
-            save_path,
-            model,
-            optimizer,
-            early_stop,
-            device
-        )
+    # Load or initialize model
+    (model, optimizer, early_stop, start_epoch, num_epochs, batch_size, train_losses, val_losses
+    ) = load_or_initialize(save_path=save_path, device=device, hyperparams=hyperparams, resume=resume)
 
     # Loaders
-    #num_workers = max(1, min(8, os.cpu_count() // 2))
     num_workers = 0
     train_loader = DataLoader(train_ds, batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    # --- Après avoir créé le DataLoader ---
-    for imgs, msks, wmaps in train_loader:
-        print("Mask unique values:", torch.unique(msks))        # doit être [0,1]
-        print("Weight map stats: min", wmaps.min().item(),
-          "max", wmaps.max().item(),
-          "mean", wmaps.mean().item())                     # min/max doivent varier autour de 1
-        break  # juste le premier batch pour debug
+    # --------------------------------------------------------
+    # Loss function
+    criterion = UNetWeightedCELoss()
 
     # Training loop
     print("Starting training...\n")
@@ -229,70 +261,21 @@ def train_model_paper(
         for imgs, msks, wmaps in train_loader:
             imgs = imgs.to(device)
             msks = msks.to(device).long()
-
-            """
-            cell_ratio = (msks == 1).float().mean().item()
-            print(f"[DEBUG] Cell ratio in batch: {cell_ratio:.4f}")"""
-
             wmaps = wmaps.to(device).float()
-
-            # --- SANITY CHECK INPUTS ---
-            if torch.isnan(imgs).any() or torch.isinf(imgs).any():
-                raise RuntimeError("NaN/Inf detected in INPUT IMAGES")
-
-            if torch.isnan(msks).any() or torch.isinf(msks).any():
-                raise RuntimeError("NaN/Inf detected in MASKS")
-
-            if torch.isnan(wmaps).any() or torch.isinf(wmaps).any():
-                raise RuntimeError("NaN/Inf detected in WEIGHT MAPS")
-
-            if wmaps.min() <= 0:
-                print("[WARNING] weight map has non-positive values:", wmaps.min().item())
-
-            #print("image :",imgs,"mask", msks, "weight_map", wmaps)
     
             optimizer.zero_grad()                   # Zero gradients
             preds = model(imgs)             # Forward pass
-            #print("preds:", preds)
-
-            """
-            # Inspecter les activations
-            print("Logits stats: min", preds.min().item(),
-                "max", preds.max().item(),
-                "mean", preds.mean().item())"""
-
-            # Debug: vérifier que preds ne contiennent pas d'explosions
-            if torch.isnan(preds).any() or torch.isinf(preds).any():
-                print(f"[WARNING] NaN or Inf detected in preds at epoch {epoch + 1}. Stopping training.")
-                print("Preds stats:", preds.min().item(), preds.max().item(), preds.mean().item())
-                return None, None  # stop training
 
             loss = criterion(preds, msks, wmaps)           # Compute loss
             loss.backward()                         # Backward pass
-
-            """
-            # Calcul de la norme totale des gradients
-            total_norm = 0.0
-            for p in model.parameters():
-                if p.grad is not None:
-                    param_norm = p.grad.data.norm(2)  # norme L2
-                    total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** 0.5
-
-            # Clipping conditionnel
-            if total_norm > 1.0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                #print(f"[DEBUG] Gradient norm {total_norm:.3f} > 1.0, clipping applied")
-            else:
-                #print(f"[DEBUG] Gradient norm {total_norm:.3f}, no clipping needed")
-                pass
-            """
                 
             optimizer.step()                        # Update weights   
             epoch_loss += loss.item()               # Accumulate loss
 
         epoch_loss /= len(train_loader)             # Average loss
         train_losses.append(epoch_loss)
+
+        print(f"[TRAIN] Loss: {epoch_loss:.4f}")
 
         # -----------------
         # "Validation" phase (modele évalué sur le même dataset)
@@ -302,24 +285,12 @@ def train_model_paper(
         dice_sum = 0.0
         recall_front_sum = 0.0
         frontier_frac_sum = 0.0
+
         with torch.no_grad():
             for imgs, msks, wmaps in val_loader:  # même loader, juste eval
                 imgs = imgs.to(device)
                 msks = msks.to(device).long()
                 wmaps = wmaps.to(device).float()
-
-                # --- SANITY CHECK INPUTS ---
-                if torch.isnan(imgs).any() or torch.isinf(imgs).any():
-                    raise RuntimeError("NaN/Inf detected in INPUT IMAGES")
-
-                if torch.isnan(msks).any() or torch.isinf(msks).any():
-                    raise RuntimeError("NaN/Inf detected in MASKS")
-
-                if torch.isnan(wmaps).any() or torch.isinf(wmaps).any():
-                    raise RuntimeError("NaN/Inf detected in WEIGHT MAPS")
-
-                if wmaps.min() <= 0:
-                    print("[WARNING] weight map has non-positive values:", wmaps.min().item())
 
                 preds = model(imgs)             # Forward pass
                 loss = criterion(preds, msks, wmaps)
@@ -352,18 +323,12 @@ def train_model_paper(
         )
 
         # ---------------- DEBUG ----------------
-        if epoch % 1 == 0:
-            #print("Unique mask values:", torch.unique(msks))
-            cell_ratio = (msks == 1).sum().item() / msks.numel()
-            #print(f"[DEBUG] Cell ratio (batch_size=1): {cell_ratio:.4f}")
-            #print("[DEBUG] Mask stats:", log_mask_stats(msks))
-
+        if DEBUG_VIS:
             # Probabilités brutes
             with torch.no_grad():
                 probs = torch.softmax(preds, dim=1)  # shape [B, C, H, W]
                 # Exemple pour le premier batch
                 probs_img = probs[0].detach().cpu().numpy()  # shape [C, H, W]
-                #print("Probs shape:", probs_img.shape)
                 print("Probs min/max per class:", probs_img.min(axis=(1,2)), probs_img.max(axis=(1,2)))
 
             pred = torch.argmax(preds, dim=1)
@@ -372,9 +337,8 @@ def train_model_paper(
             pred_image = pred.float() * 255
             if torch.mean(pred_image) < 128:  # plus de pixels blancs que noirs
                 pred_image = 255 - pred_image
-                
-            if DEBUG_VIS:
-                save_debug_image(imgs[0], msks[0], pred_image[0], os.path.join(out_dir, f"{model_save}_epoch_{epoch + 1}.png"))
+            
+            save_debug_image(imgs[0], msks[0], pred_image[0], os.path.join(out_dir, f"{model_save}_epoch_{epoch + 1}.png"))
         # --------------------------------------
 
         # ---------------- CHECKPOINTING ----------------
@@ -411,108 +375,5 @@ def train_model_paper(
                 hyperparams
             )
     print(f"\nModel saved as {model_save} in {model_dir} with checkpoint at epoch {epoch + 1}\n")
-
-    return (model, train_losses, val_losses)
-
-
-# --------- TRAINING FUNCTION FOR PAPER SETUP ------------------------------
-def train_model_study(
-    model_dir,
-    model_save,
-    train_subset, 
-    val_subset,
-    hyperparams,
-    device,
-    resume=False,
-):
-    
-    # Unpack hyperparameters
-    num_epochs, learning_rate, momentum,  dropout_rate, batch_size = hyperparams
-
-    # Loaders
-    #num_workers = max(1, min(8, os.cpu_count() // 2))
-    num_workers = 0
-    train_loader = DataLoader(train_subset, batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    val_loader = DataLoader(val_subset, batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-
-    # Create path
-    hyperparams_str = "_".join(str(h) for h in checkpoint['hyperparams'])
-    save_path = os.path.join(model_dir, f"{hyperparams_str}_{model_save}")
-
-    # Initialize model, optimizer, loss
-    if resume and os.path.exists(save_path):
-        checkpoint = torch.load(save_path)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        num_epochs, learning_rate, momentum,  dropout_rate, batch_size = checkpoint['hyperparams']
-    else:
-        model = UNet(dropout_rate=dropout_rate).to(device)
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=255)
-
-    # Training loop
-    train_losses = []
-    val_losses = []
-    print("Starting training...\n")
-
-    early_stop = EarlyStoppingValLoss(
-        patience=10,
-        min_delta=1e-4,
-        warmup_epochs=20
-    )
-
-    for epoch in range(num_epochs):
-        print(f"Epoch {epoch + 1}/{num_epochs}")
-
-        # Training phase
-        model.train()
-        epoch_train_loss = 0
-        for imgs, msks in train_loader:
-            imgs = imgs.to(device)
-            msks = msks.to(device).long()
-
-            optimizer.zero_grad()                   # Zero gradients
-            preds = model(imgs)                     # Forward pass
-            loss = criterion(preds, msks)           # Compute loss
-            loss.backward()                         # Backward pass
-            optimizer.step()                        # Update weights   
-            epoch_train_loss += loss.item()         # Accumulate loss
-
-        epoch_train_loss /= len(train_loader)       # Average loss
-        train_losses.append(epoch_train_loss)
-
-        # Validation phase
-        model.eval()
-        epoch_val_loss = 0
-        with torch.no_grad():
-            for imgs, msks in val_loader:
-                imgs = imgs.to(device)
-                msks = msks.to(device).long()
-
-                preds = model(imgs)                 # Forward pass    
-                loss = criterion(preds, msks)       # Compute loss       
-                epoch_val_loss += loss.item()       # Accumulate loss
-
-        epoch_val_loss /= len(val_loader)
-        val_losses.append(epoch_val_loss)
-
-        early_stop.step(epoch_val_loss)
-        if early_stop.stop:
-            print(
-                f"[EARLY STOP] Validation loss n'améliore plus "
-                f"(best = {early_stop.best_val_loss:.4f})"
-            )
-            break
-
-    # Create checkpoint dict
-    checkpoint = {
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'hyperparams': (num_epochs, learning_rate, momentum, dropout_rate, train_loader.batch_size)
-    }    
-    
-    # Save model
-    torch.save(checkpoint, save_path)
-    print(f"\nModel saved as {hyperparams_str}_{model_save} in {model_dir}")
 
     return (model, train_losses, val_losses)

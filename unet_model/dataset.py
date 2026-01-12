@@ -1,6 +1,6 @@
+import importlib
 import os
 import numpy as np
-import cv2
 import random
 from glob import glob
 from PIL import Image
@@ -8,8 +8,7 @@ import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as transforms
 from scipy.ndimage import distance_transform_edt
-from dataset_normalizer.data_augmentation import elastic_deformation_3x3, random_rotate_shift, intensity_variation
-from config import USE_DATA_AUG, USE_IGNORE_INDEX, USE_LOSS_POND
+from unet_model import data_augmentation
 
 # --------------------------------------------------
 #  1. Fonction Center Crop Image
@@ -35,14 +34,14 @@ def unet_weight_map(mask, w0=10, sigma=5):
     """
     labels = mask.astype(np.int32)
 
-    # --- 1. Poids de classe pour corriger le déséquilibre ---
+    # --- 1. Class weights to correct imbalance ---
     unique, counts = np.unique(labels, return_counts=True)
     class_weights = {c: 1.0/count for c, count in zip(unique, counts)}
     w_c = np.zeros_like(labels, dtype=np.float32)
     for c in unique:
         w_c[labels == c] = class_weights[c]
 
-    # --- 2. Composante "bord" pour séparer les membranes proches ---
+    # --- 2. Distance-based weights to separate touching objects ---
     if labels.max() < 2:
         # Si pas de classes multiples, poids uniforme
         weight = np.ones_like(labels, dtype=np.float32)
@@ -56,11 +55,11 @@ def unet_weight_map(mask, w0=10, sigma=5):
     d1 = np.min(distances, axis=0)
     d2 = np.partition(distances, 1, axis=0)[1]
 
-    # --- 3. Poids total ---
+    # --- 3. Total Weight ---
     weight = w_c + w0 * np.exp(-((d1 + d2)**2) / (2 * sigma**2))
     weight = weight.astype(np.float32)
 
-    
+    # --- 4. Normalization ---
     weight = np.sqrt(weight)         # ou weight**0.25 pour aplatir le max
     weight = 1 / (1 + weight)        # borne supérieure et préserve min
 
@@ -69,40 +68,18 @@ def unet_weight_map(mask, w0=10, sigma=5):
         raise RuntimeError(f"Weight map mean too small: {mean}")
     weight = weight / mean
     
-    """
-    # stats post-normalisation
-    stats = {
-        "min": weight.min(),
-        "max": weight.max(),
-        "mean": weight.mean(),
-        "p0.1": np.percentile(weight, 0.1),
-        "p99.9": np.percentile(weight, 99.9)
-    }
-    print("Weight map stats after mean:", stats)"""
-    
     weight_map = np.clip(weight, 0.1, 5.0)      # clip extreme values
-    """
-    # stats post-normalisation
-    stats_2 = {
-        "min": weight_map.min(),
-        "max": weight_map.max(),
-        "mean": weight_map.mean(),
-        "p0.1": np.percentile(weight_map, 0.1),
-        "p99.9": np.percentile(weight_map, 99.9)
-    }
-    print("Weight map stats after mean and clip:", stats_2)"""
 
     return weight_map
 
 
 # ========== DATASET DEFINITION ================================================
 class SegmentationDataset(Dataset):
-    def __init__(self, img2mask, train=True, use_ignore_index=False):
+    def __init__(self, img2mask, train=True):
         self.img2mask = img2mask
         self.images = list(img2mask.keys())
         self.train = train
         self.to_tensor = transforms.ToTensor()
-        self.use_ignore_index = use_ignore_index
 
     def __len__(self):
         return len(self.images)
@@ -119,16 +96,18 @@ class SegmentationDataset(Dataset):
         # Convert to numpy arrays
         image = np.array(image).astype(np.float32)
         mask = np.array(mask).astype(np.float32)
+
         # Data augmentations
         if self.train:
-            image, mask = elastic_deformation_3x3(image, mask)
-            image, mask = random_rotate_shift(image, mask)
-            image = intensity_variation(image)
+            importlib.reload(data_augmentation)
+            image, mask = data_augmentation.elastic_deformation_3x3(image, mask)
+            image, mask = data_augmentation.random_rotate_shift(image, mask)
+            image = data_augmentation.intensity_variation(image)
 
         # Resize mask to target size for UNet
         mask = center_crop_img(mask, (388, 388))
 
-        # Transformations to tensors and mask binarization
+        # Transformations to tensors
         image = self.to_tensor(image / 255.0).float()
 
         # --- Prepare mask for weight map generation ---
@@ -146,24 +125,43 @@ class SegmentationDataset(Dataset):
     
 
 # ========== DATASET CREATION =====================================
-def dataset_ds(root_dir, ratios=(0.7, 0.15, 0.15), seed=42):
-    all_pngs = sorted(glob(os.path.join(root_dir, "*.png")))
-    img2mask = [(p, p.replace(".png", "_combined_mask.png")) 
-            for p in all_pngs if not p.endswith("_combined_mask.png")]
+def dataset_ds(root_dir_1, root_dir_2, ratios=(0.7, 0.15, 0.15), seed=42):
+    if root_dir_1 != root_dir_2:
+        # Combine datasets from two directories
+        all_pngs_1 = sorted(glob(os.path.join(root_dir_1, "*.png")))
+        img2mask_1 = [(p, p.replace(".png", "_combined_mask.png")) 
+                for p in all_pngs_1 if not p.endswith("_combined_mask.png")]
+        
+        all_pngs_2 = sorted(glob(os.path.join(root_dir_2, "*.png")))
+        img2mask_2 = [(p, p.replace(".png", "_combined_mask.png")) 
+                for p in all_pngs_2 if not p.endswith("_combined_mask.png")]
+        
+        # 2. Shuffle (NECESSARY)
+        random.seed(seed)
+        random.shuffle(img2mask_1)
+        random.shuffle(img2mask_2)
 
-    # 2. Shuffle (OBLIGATOIRE)
-    random.seed(seed)
-    random.shuffle(img2mask)
+        n_1 = len(img2mask_1)
+        n_2 = len(img2mask_2)
+        n_train = int(ratios[0] * n_1)
+        print(f"Dataset split: {n_train} train | {n_1 - n_train} val | {n_2} test")
 
-    n = len(img2mask)
-    n_train = int(ratios[0] * n)
-    n_val   = int(ratios[1] * n)
-    print(f"Dataset split: {n_train} train | {n_val} val | {n - n_train - n_val} test (total: {n})")
+        return {"train":img2mask_1[:n_train], "val":img2mask_1[n_train:], "test":  img2mask_2,
+            "seed": seed, "ratio": ratios}
 
-    return {
-        "train": img2mask[:n_train],
-        "val":   img2mask[n_train:n_train+n_val],   # volontairement identique chez toi
-        "test":  img2mask[n_train+n_val:],
-        "seed":  seed,
-        "ratio": ratios
-    }
+    else:
+        all_pngs = sorted(glob(os.path.join(root_dir_1, "*.png")))
+        img2mask = [(p, p.replace(".png", "_combined_mask.png")) 
+                    for p in all_pngs if not p.endswith("_combined_mask.png")]
+                    
+        # 2. Shuffle (NECESSARY)
+        random.seed(seed)
+        random.shuffle(img2mask)
+
+        n = len(img2mask)
+        n_train = int(ratios[0] * n)
+        n_val   = int(ratios[1] * n)
+        print(f"Dataset split: {n_train} train | {n_val} val | {n - n_train - n_val} test (total: {n})")
+
+        return {"train":img2mask[:n_train], "val":img2mask[n_train:n_train+n_val], "test":  img2mask[n_train+n_val:],
+            "seed": seed, "ratio": ratios}

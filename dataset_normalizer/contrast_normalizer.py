@@ -78,4 +78,6 @@ def contrast(input_dir, output_dir):
         img = np.array(img).astype(np.float32)/255.0
         Image.fromarray((img*255).astype(np.uint8)).save(out_path)
 
-    print(f"Normalization completed: {combined_count} images processed and saved to {output_dir}")
+        combined_count += 1
+
+    print(f"Normalization completed: {combined_count} images and masks processed and saved to {output_dir}")

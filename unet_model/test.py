@@ -1,74 +1,49 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.ndimage import binary_dilation, rotate, distance_transform_edt
-from sklearn.metrics import adjusted_rand_score
-from skimage.segmentation import watershed, find_boundaries
+from torch.utils.data import DataLoader
+from unet_model.model import UNet
+from scipy.ndimage import rotate, distance_transform_edt
+from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
+from unet_model.metrics import pixel_error, rand_error, warping_error_normalized, dice, iou_score
 
+# ========== CHECKPOINT ================================================
+def load_checkpoint(save_path, device):
+    """ Load model and batch size from checkpoint. """
+    ckpt = torch.load(save_path, map_location=device)
+    hyperparams = ckpt["hyperparams"]
+    _, _, _, dropout_rate, batch_size = hyperparams
 
-# -------------------------------
-#   METRICS
-# -------------------------------
+    model = UNet(dropout_rate=dropout_rate).to(device)
+    model.load_state_dict(ckpt["model_state"])
 
-def warping_error(pred, target):
-    """
-    Simple warping error based on contour mismatches
-    pred, target: H x W, integers
-    """
-    # Extract edges
-    pred_edges = find_boundaries(pred, mode='outer')
-    target_edges = find_boundaries(target, mode='outer')
-    
-    # Dilate edges to tolerate small misalignments
-    pred_edges_dil = binary_dilation(pred_edges)
-    target_edges_dil = binary_dilation(target_edges)
-    
-    # Count mismatched edge pixels
-    mismatch = np.logical_xor(pred_edges_dil, target_edges_dil)
-    return mismatch.sum() / target_edges_dil.sum()  # proportion d’erreur
+    return (model, batch_size)
 
-def rand_error(pred, target):
-    """
-    Computes Rand error between two label masks
-    Returns 1 - Adjusted Rand Index (so error = 0 if perfect)
-    """
-    return 1 - adjusted_rand_score(target.flatten(), pred.flatten())
-
-def pixel_error(pred, target):
-    """
-    Compute the pixel-wise error.
-    pred, target: H x W (or B x H x W), integers (class labels)
-    Returns error rate between 0 and 1
-    """
-    return np.mean(pred != target)
-
-def iou_score(pred, target, eps=1e-6):
-    """Compute the IoU (Intersection over Union) between prediction and target mask."""
-    pred = pred.flatten()
-    target = target.flatten()
-    intersection = (pred * target).sum()
-    union = pred.sum() + target.sum() - intersection  # Compute union
-    return (intersection + eps) / (union + eps)
-
-def dice(pred, target, eps=1e-6):
-    pred = pred.astype(bool)
-    target = target.astype(bool)
-    inter = (pred & target).sum()
-    return (2*inter + eps) / (pred.sum() + target.sum() + eps)
-
+def safe_mean(lst):
+    lst = [x for x in lst if not np.isnan(x)]
+    return np.mean(lst) if len(lst) > 0 else float('nan')
 
 # -------------------------------
 #   TESTS FUNCTIONS
 # -------------------------------
-def test_em_unet(model, dataloader, device, thresholds=np.linspace(0.0, 1.0, 10), rot_angles = [0, 45, 90, 135, 180, 225, 270], num_samples_to_show=2):
+def test_em_unet(save_path, test_ds, device, thresholds=np.linspace(0.4, 0.55, 10), rot_angles = [0, 45, 90, 135, 180, 225, 270], num_samples_to_show=2):
+    # Unpack hyperparameters
+    model, batch_size = load_checkpoint(save_path, device)
     model.eval()
 
-    pixel_scores, rand_scores, warp_scores = [], [], []
-    precisions_scores, recalls_scores = [], []
+    # Loaders
+    num_workers = 0
+    test_loader = DataLoader(test_ds, batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
+    metrics = {
+        t: {"pixel": [], "rand": [], "warp": [], "prec": [], "rec": []}
+        for t in thresholds
+    }
+
+    k = 0
     with torch.no_grad():
-        for i, (img, mask, _) in enumerate(dataloader):
+        for i, (img, mask, _) in enumerate(test_loader):
             img = img.to(device)
             mask_np = mask.cpu().numpy()[0]  # ground truth pour cette image
 
@@ -80,57 +55,71 @@ def test_em_unet(model, dataloader, device, thresholds=np.linspace(0.0, 1.0, 10)
                 
                 logits = model(rotated_img_tensor)
                 prob_map_rot = torch.softmax(logits, dim=1)[0,1].cpu().numpy()
-                # remettre la rotation à l’original
+                # Restore the rotation to the original
                 prob_map_rot = rotate(prob_map_rot, -angle, reshape=False)
                 prob_maps.append(prob_map_rot)
 
-            # moyenne des probabilités sur les rotations
+            # Average probability of rotations
             prob_map = np.mean(prob_maps, axis=0)
 
-            # calcul des métriques pour 10 seuils
+            # Calculating metrics for 10 thresholds
             for t in thresholds:
                 pred = (prob_map > t).astype(np.uint8)
-                valid_mask = mask_np != 255
+                gt   = (mask_np > 0).astype(np.uint8)
+                valid = mask_np != 255
 
-                # Pixel-wise metrics
-                warp_scores.append(warping_error(pred[valid_mask], mask_np[valid_mask]))
-                rand_scores.append(rand_error(pred[valid_mask], mask_np[valid_mask]))
-                pixel_scores.append(pixel_error(pred[valid_mask], mask_np[valid_mask]))
+                metrics[t]["pixel"].append(
+                    pixel_error(pred[valid], gt[valid])
+                )
+                metrics[t]["rand"].append(
+                    rand_error(pred[valid], gt[valid])
+                )
+                metrics[t]["warp"].append(
+                    warping_error_normalized(pred, gt)
+                )
 
-                # Optional precision / recall
-                TP = np.logical_and(pred[valid_mask]==1, mask_np[valid_mask]==1).sum()
-                FP = np.logical_and(pred[valid_mask]==1, mask_np[valid_mask]==0).sum()
-                FN = np.logical_and(pred[valid_mask]==0, mask_np[valid_mask]==1).sum()
-                precisions_scores.append(TP/(TP+FP+1e-6))
-                recalls_scores.append(TP/(TP+FN+1e-6))
+                # Precision and Recall at threshold t
+                TP = np.logical_and(pred[valid]==1, gt[valid]==1).sum()
+                FP = np.logical_and(pred[valid]==1, gt[valid]==0).sum()
+                FN = np.logical_and(pred[valid]==0, gt[valid]==1).sum()
 
-            # Display some sample predictions
-            if i < num_samples_to_show:
-                fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+                metrics[t]["prec"].append(TP/(TP+FP+1e-6))
+                metrics[t]["rec"].append(TP/(TP+FN+1e-6))
 
-                axes[0].imshow(img.cpu().numpy()[0, 0], cmap="gray")
-                axes[0].set_title("Image")
-                axes[0].axis("off")
+                # Display some sample predictions
+                if k < num_samples_to_show:
+                    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
-                axes[1].imshow(mask_np, cmap="gray")
-                axes[1].set_title("Ground Truth")
-                axes[1].axis("off")
+                    axes[0].imshow(img.cpu().numpy()[0, 0], cmap="gray")
+                    axes[0].set_title("Image")
+                    axes[0].axis("off")
 
-                axes[2].imshow(pred, cmap="gray")
-                axes[2].set_title("Prediction (Watershed)")
-                axes[2].axis("off")
+                    axes[1].imshow(mask_np, cmap="gray")
+                    axes[1].set_title("Ground Truth")
+                    axes[1].axis("off")
+                    
+                    axes[2].imshow(pred, cmap="gray")
+                    axes[2].set_title("Prediction")
+                    axes[2].axis("off")
 
-                plt.tight_layout()
-                plt.show()
+                    plt.tight_layout()
+                    plt.show()
+
+                    k+=1
+
+    # Aggregate over all thresholds
+    best_t = min(metrics, key=lambda t: np.mean(metrics[t]["rand"]))
+    best_scores = {k: np.mean(v) for k, v in metrics[best_t].items()}
 
     # Average results
-    mean_warp  = np.mean(warp_scores)
-    mean_rand  = np.mean(rand_scores)
-    mean_pix   = np.mean(pixel_scores)
-    mean_prec  = np.mean(precisions_scores)
-    mean_rec   = np.mean(recalls_scores)
+    mean_warp = best_scores["warp"]
+    mean_rand = best_scores["rand"]
+    mean_pix  = best_scores["pixel"]
+    mean_prec = best_scores["prec"]
+    mean_rec  = best_scores["rec"]
 
     print("\n======= EM TEST RESULTS =======")
+    print(f"Best Threshold (Rand): {best_t:.3f}")
     print(f"Warping Error: {mean_warp:.6f}")
     print(f"Rand Error:    {mean_rand:.6f}")
     print(f"Pixel Error:   {mean_pix:.6f}")
@@ -141,14 +130,20 @@ def test_em_unet(model, dataloader, device, thresholds=np.linspace(0.0, 1.0, 10)
     return mean_warp, mean_rand, mean_pix, mean_prec, mean_rec
 
 
-def test_cell_tracking_unet(model, dataloader, device, threshold=0.5, num_samples_to_show=2):
+def test_cell_tracking_unet(save_path, test_ds, device, threshold=0.5, num_samples_to_show=2):
+    # Unpack hyperparameters
+    model, batch_size = load_checkpoint(save_path, device)
     model.eval()
+
+    # Loaders
+    num_workers = 0
+    test_loader = DataLoader(test_ds, batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
     iou_scores, dice_scores = [], []
     precisions_scores, recalls_scores = [], []
 
     with torch.no_grad():
-        for i, (img, mask, _) in enumerate(dataloader):
+        for i, (img, mask, _) in enumerate(test_loader):
             img  = img.to(device)
             mask = mask.to(device)
 

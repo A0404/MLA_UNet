@@ -93,10 +93,8 @@ def intensity_variation(image):
 
     # Clip values to [0,1] to avoid overflow
     image_np = np.clip(image_np, 0.0, 1.0)
-    # Convert back to PIL Image (uint8)
-    image_out = Image.fromarray((image_np * 255).astype(np.uint8))
 
-    return image_out
+    return image_np * 255.0
 
 
 def compute_dropout_rate(dataset_size):

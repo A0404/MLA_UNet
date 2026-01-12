@@ -17,6 +17,8 @@ def name_in_folder(input_dir, output_dir):
     if len(input_dir) == 1:
         source = input_dir[0]
         all_files = sorted(glob(os.path.join(source, "*")))
+        all_files = [f for f in all_files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif'))]
+
         images = []
         masks = []
         for p in all_files:
@@ -50,11 +52,15 @@ def name_in_folder(input_dir, output_dir):
     images_sorted = sorted(images, key=lambda p: extract_id(p) or 0)
 
     # Copy files into output_dir with consistent naming: img_000.png, img_000_mask_1.png, ...
-    count = 0
+    count, k = 0, 0
     for img_path in images_sorted:
         idx = extract_id(img_path)
         if idx is None:
             continue
+
+        associated_masks = masks_by_id.get(idx, [])
+        if not associated_masks:
+            continue            # No GT → Ignore image
 
         # Keep original extension when copying
         img_ext = os.path.splitext(img_path)[1] or ".png"
@@ -63,12 +69,14 @@ def name_in_folder(input_dir, output_dir):
         shutil.copy2(img_path, dest_img_path)
 
         # Copy associated masks (if any) and enumerate them
-        for i, mask_path in enumerate(masks_by_id.get(idx, []), start=1):
+        for i, mask_path in enumerate(associated_masks, start=1):
             mask_ext = os.path.splitext(mask_path)[1] or ".png"
             dest_mask_name = f"img_{count:03d}_mask_{i}{mask_ext}"
             dest_mask_path = os.path.join(output_dir, dest_mask_name)
             shutil.copy2(mask_path, dest_mask_path)
+            k += 1
 
         count += 1
+        
 
-    print(f"Naming completed: {count*2} items copied to {output_dir}")
+    print(f"Naming completed: {count + k} items copied to {output_dir}")

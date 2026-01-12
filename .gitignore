@@ -10,7 +10,7 @@ __pycache__/
 *.png
 *.jpg
 *.jpeg
-*.bmp
+*.tif
 
 # Autres fichiers temporaires
 *.log

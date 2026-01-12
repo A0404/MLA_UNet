@@ -4,6 +4,27 @@ import cv2
 import numpy as np
 from glob import glob
 
+def binarize_mask(mask):
+    """
+    Automatically binarize a mask:
+    - probabilistic: threshold 0.5
+    - float but not probabilistic: threshold 0
+    - integer labels: threshold 0
+    """
+    # Float mask (probabilistic)
+    if np.issubdtype(mask.dtype, np.floating):
+        min_val, max_val = mask.min(), mask.max()
+
+        if 0.0 == min_val and max_val == 1.0:
+            # Probabilistic mask
+            return (mask > 0.5).astype(np.uint8)
+        else:
+            # Pathological case: float but not a probability
+            return (mask > 0).astype(np.uint8)
+    # Mask of integer labels
+    else:
+        return (mask > 0).astype(np.uint8)
+
 def read_image(path, flags=cv2.IMREAD_UNCHANGED):
     """
     Robust image reader: tries cv2.imread first, 
@@ -56,7 +77,7 @@ def normalize_to_mean(img, target_mean=0.5):
 
     return img
 
-def mask_combiner(input_path, output_path, size=572, threshold=0.5):
+def mask_combiner(input_path, output_path, size=572):
     """
     Combine masks for each image and save as PNG.
 
@@ -67,6 +88,7 @@ def mask_combiner(input_path, output_path, size=572, threshold=0.5):
     """
     os.makedirs(output_path, exist_ok=True)
     all_files = sorted(glob(os.path.join(input_path, "*")))
+    all_files = [f for f in all_files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif'))]
 
     # Separate images from masks
     image_files = []
@@ -95,6 +117,11 @@ def mask_combiner(input_path, output_path, size=572, threshold=0.5):
         idx = extract_index(img_path)
         if idx is None:
             continue
+        
+        # --- Combine masks ---
+        mask_list = masks_by_index.get(idx, [])
+        if not mask_list:
+            continue        # No GT → Ignore image
 
         # --- Read & resize image ---
         img = read_image(img_path, cv2.IMREAD_UNCHANGED)
@@ -110,11 +137,6 @@ def mask_combiner(input_path, output_path, size=572, threshold=0.5):
         out_img_path = os.path.join(output_path, os.path.splitext(os.path.basename(img_path))[0] + ".png")
         write_image(out_img_path, img)
 
-        # --- Combine masks ---
-        mask_list = masks_by_index.get(idx, [])
-        if not mask_list:
-            continue
-
         accumulated_mask = None
         for mask_path in mask_list:
             m = read_image(mask_path, cv2.IMREAD_UNCHANGED)
@@ -125,7 +147,8 @@ def mask_combiner(input_path, output_path, size=572, threshold=0.5):
             if m.shape[:2] != (size, size):
                 interp = cv2.INTER_AREA if max(m.shape[:2]) > size else cv2.INTER_CUBIC
                 m = cv2.resize(m, (size, size), interpolation=interp)
-            m = m.astype(np.float32) / 255.0    # Normalize to [0,1]
+            if m.max() > 1.0:
+                m = m.astype(np.float32) / 255.0    # Normalize to [0,1]
             # Accumulate masks by summing
             accumulated_mask = m if accumulated_mask is None else accumulated_mask + m
 
@@ -133,9 +156,10 @@ def mask_combiner(input_path, output_path, size=572, threshold=0.5):
             continue
 
         # Threshold to get binary mask
-        final_mask = (accumulated_mask > threshold).astype(np.uint8) * 255
+        final_mask = binarize_mask(accumulated_mask)*255
         out_mask_name = os.path.splitext(os.path.basename(img_path))[0] + "_combined_mask.png"
         write_image(os.path.join(output_path, out_mask_name), final_mask)
+        
         combined_count += 1
 
     print(f"Combination completed: {combined_count} masks copied to {output_path}")
