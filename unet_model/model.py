@@ -52,7 +52,7 @@ class DoubleConv(nn.Module):
 #     Each step = 2 conv + maxpool (except in case of a bottleneck)
 # --------------------------------------------------
 class Encoder(nn.Module):
-    def __init__(self, dropout_rate=0.5):
+    def __init__(self, dropout_rate=0.05):
         super().__init__()
         self.enc1 = DoubleConv(1, 64)
         self.enc2 = DoubleConv(64, 128)
@@ -132,7 +132,7 @@ class Decoder(nn.Module):
 #  5. U-NET MODEL
 # --------------------------------------------------
 class UNet(nn.Module):
-    def __init__(self, num_classes=2, dropout_rate=0.5):
+    def __init__(self, num_classes=2, dropout_rate=0.05):
         super().__init__()
         self.encoder = Encoder(dropout_rate=dropout_rate)
         self.decoder = Decoder()

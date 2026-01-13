@@ -78,5 +78,4 @@ def name_in_folder(input_dir, output_dir):
 
         count += 1
         
-
     print(f"Naming completed: {count + k} items copied to {output_dir}")

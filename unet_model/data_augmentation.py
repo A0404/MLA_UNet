@@ -1,6 +1,5 @@
 import numpy as np
 import cv2
-from PIL import Image
 
 def elastic_deformation_3x3(image, mask, sigma=10, p=0.7):
     """
@@ -59,25 +58,21 @@ def elastic_deformation_3x3(image, mask, sigma=10, p=0.7):
     return img_deformed, mask_deformed
 
 
-def random_rotate_shift(image, mask, max_angle=30, max_shift=5, p=0.8):
-
-    # --- 1. Apply function with probability ---
+def random_rotate_shift(image, mask, max_angle=15, max_shift=3, p=0.8):
     if np.random.rand() > p:
         return image, mask
-    
-    # --- 2. Sample random angle and shifts ---
-    angle = np.random.normal(0, max_angle)
-    tx = np.random.normal(0, max_shift)
-    ty = np.random.normal(0, max_shift)
+
+    angle = np.random.uniform(-max_angle, max_angle)
+    tx = np.random.uniform(-max_shift, max_shift)
+    ty = np.random.uniform(-max_shift, max_shift)
 
     from scipy.ndimage import rotate, shift
 
-    # --- 3. Apply rotation and shift ---
     image = rotate(image, angle, reshape=False, order=3, mode="reflect")
-    mask  = rotate(mask, angle, reshape=False, order=0)
+    mask  = rotate(mask, angle, reshape=False, order=0, mode="reflect")
 
-    image = shift(image, shift=(ty, tx), order=3, mode="reflect")
-    mask  = shift(mask, shift=(ty, tx), order=0)
+    image = shift(image,  shift=(ty, tx), order=3, mode="reflect")
+    mask  = shift(mask,   shift=(ty, tx), order=0, mode="reflect")
 
     return image, mask
 
@@ -95,16 +90,3 @@ def intensity_variation(image):
     image_np = np.clip(image_np, 0.0, 1.0)
 
     return image_np * 255.0
-
-
-def compute_dropout_rate(dataset_size):
-    """
-    Exponentially decaying dropout:
-    - f(0)   = 0.5
-    - f(∞)   = 0
-    - form : f(x) = 0.5 * exp(-x/tau)
-    - f(500) = 0.25
-    - Result : tau = 500 / log(2)
-    """
-    tau = 500 / np.log(2)         
-    return 0.5 * np.exp(-dataset_size / tau)

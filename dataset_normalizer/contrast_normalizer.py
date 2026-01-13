@@ -37,12 +37,12 @@ def clahe_cv2(img, clipLimit=2.0, tileGridSize=(8,8)):
 # ------------------- Main pipeline -------------------
 def contrast(input_dir, output_dir):
     """
-    input_dir: dossier contenant les images originales (pas les masks combinés)
-    output_dir: dossier où sauvegarder les images normalisées
+    input_dir: folder containing the original images (not the combined masks)
+    output_dir: folder where the normalized images are saved
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Récupérer tous les PNG
+    # Retrieve all PNGs
     all_pngs = sorted(glob(os.path.join(input_dir, "*.png")))
     img_paths = []
     mask_paths = []
@@ -54,16 +54,16 @@ def contrast(input_dir, output_dir):
 
     combined_count = 0
     for path in img_paths:
-        # Lire avec PIL
+        # Read with PIL
         img = Image.open(path).convert('L')
         img = np.array(img).astype(np.float32)/255.0
 
-        # Normalisation et contrast enhancement
+        # Normalization and contrast enhancement
         img = normalize_to_mean(img, target_mean=0.5)
         img = contrast_stretch(img, 2, 98)
         img = clahe_cv2(img, clipLimit=2.0, tileGridSize=(8,8))
 
-        # Sauvegarde
+        # Save
         base_name = os.path.basename(path)
         out_path = os.path.join(output_dir, base_name)
         Image.fromarray((img*255).astype(np.uint8)).save(out_path)
@@ -71,7 +71,7 @@ def contrast(input_dir, output_dir):
         combined_count += 1
 
     for path in mask_paths:
-        # Copier les masks combinés sans modification
+        # Copy the combined masks without modification
         base_name = os.path.basename(path)
         out_path = os.path.join(output_dir, base_name)
         img = Image.open(path).convert('L')

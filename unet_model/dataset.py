@@ -34,12 +34,24 @@ def unet_weight_map(mask, w0=10, sigma=5):
     """
     labels = mask.astype(np.int32)
 
-    # --- 1. Class weights to correct imbalance ---
-    unique, counts = np.unique(labels, return_counts=True)
-    class_weights = {c: 1.0/count for c, count in zip(unique, counts)}
+    # --- Class frequency ---
+    classes, counts = np.unique(labels, return_counts=True)
+    freq = counts / counts.sum()
+
+    # --- Class weights (UNet-style imbalance correction) ---
+    # Option A (simple, robust)
+    alpha = 1.0 / freq
+
+    # Option B (more digitally stable, often preferable)
+    # alpha = np.median(freq) / freq
+
+    # --- Mapping class → weight ---
+    alpha_map = dict(zip(classes, alpha))
+
+    # --- Weight map ---
     w_c = np.zeros_like(labels, dtype=np.float32)
-    for c in unique:
-        w_c[labels == c] = class_weights[c]
+    for c, w in alpha_map.items():
+        w_c[labels == c] = w
 
     # --- 2. Distance-based weights to separate touching objects ---
     if labels.max() < 2:
@@ -59,18 +71,12 @@ def unet_weight_map(mask, w0=10, sigma=5):
     weight = w_c + w0 * np.exp(-((d1 + d2)**2) / (2 * sigma**2))
     weight = weight.astype(np.float32)
 
-    # --- 4. Normalization ---
-    weight = np.sqrt(weight)         # ou weight**0.25 pour aplatir le max
-    weight = 1 / (1 + weight)        # borne supérieure et préserve min
+    """
+    print("min(w_c) =", np.min(w_c), "; max(w_c) =", np.max(w_c), "; mean(w_c) =", np.mean(w_c))
+    print("min(w0*exp(.)) =", np.min(w0 * np.exp(-((d1 + d2)**2) / (2 * sigma**2))), "; max(w0*exp(.)) =", np.max(w0 * np.exp(-((d1 + d2)**2) / (2 * sigma**2))), "; mean(w0*exp(.)) =", np.mean(w0 * np.exp(-((d1 + d2)**2) / (2 * sigma**2))))
+    print("min(weight) =", np.min(weight), "; max(weight) =", np.max(weight), "; mean(weight) =", np.mean(weight),"\n") """
 
-    mean = weight.mean()
-    if mean < 1e-6:
-        raise RuntimeError(f"Weight map mean too small: {mean}")
-    weight = weight / mean
-    
-    weight_map = np.clip(weight, 0.1, 5.0)      # clip extreme values
-
-    return weight_map
+    return weight
 
 
 # ========== DATASET DEFINITION ================================================
@@ -161,7 +167,7 @@ def dataset_ds(root_dir_1, root_dir_2, ratios=(0.7, 0.15, 0.15), seed=42):
         n = len(img2mask)
         n_train = int(ratios[0] * n)
         n_val   = int(ratios[1] * n)
-        print(f"Dataset split: {n_train} train | {n_val} val | {n - n_train - n_val} test (total: {n})")
+        print(f"Dataset split: {n_train} train | {n_val} val | {n - n_train - n_val} test")
 
         return {"train":img2mask[:n_train], "val":img2mask[n_train:n_train+n_val], "test":  img2mask[n_train+n_val:],
             "seed": seed, "ratio": ratios}

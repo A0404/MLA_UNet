@@ -11,7 +11,7 @@ from unet_model.metrics import pixel_error, rand_error, warping_error_normalized
 # ========== CHECKPOINT ================================================
 def load_checkpoint(save_path, device):
     """ Load model and batch size from checkpoint. """
-    ckpt = torch.load(save_path, map_location=device)
+    ckpt = torch.load(save_path, weights_only=True)
     hyperparams = ckpt["hyperparams"]
     _, _, _, dropout_rate, batch_size = hyperparams
 
@@ -24,10 +24,29 @@ def safe_mean(lst):
     lst = [x for x in lst if not np.isnan(x)]
     return np.mean(lst) if len(lst) > 0 else float('nan')
 
+# ====== PLOT IMAGE, MASK, PRED =========================================
+def plot_image(img, mask_np, pred):
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+    axes[0].imshow(img.cpu().numpy()[0, 0], cmap="gray")
+    axes[0].set_title("Image")
+    axes[0].axis("off")
+
+    axes[1].imshow(mask_np, cmap="gray")
+    axes[1].set_title("Ground Truth")
+    axes[1].axis("off")
+    
+    axes[2].imshow(pred, cmap="gray")
+    axes[2].set_title("Prediction")
+    axes[2].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
 # -------------------------------
 #   TESTS FUNCTIONS
 # -------------------------------
-def test_em_unet(save_path, test_ds, device, thresholds=np.linspace(0.4, 0.55, 10), rot_angles = [0, 45, 90, 135, 180, 225, 270], num_samples_to_show=2):
+def test_em_unet(save_path, test_ds, device, thresholds=np.linspace(0.2, 0.29, 10), rot_angles = [0, 45, 90, 135, 180, 225, 270], num_samples_to_show=2):
     # Unpack hyperparameters
     model, batch_size = load_checkpoint(save_path, device)
     model.eval()
@@ -68,15 +87,9 @@ def test_em_unet(save_path, test_ds, device, thresholds=np.linspace(0.4, 0.55, 1
                 gt   = (mask_np > 0).astype(np.uint8)
                 valid = mask_np != 255
 
-                metrics[t]["pixel"].append(
-                    pixel_error(pred[valid], gt[valid])
-                )
-                metrics[t]["rand"].append(
-                    rand_error(pred[valid], gt[valid])
-                )
-                metrics[t]["warp"].append(
-                    warping_error_normalized(pred, gt)
-                )
+                metrics[t]["pixel"].append(pixel_error(pred[valid], gt[valid]))
+                metrics[t]["rand"].append(rand_error(pred[valid], gt[valid]))
+                metrics[t]["warp"].append(warping_error_normalized(pred, gt))
 
                 # Precision and Recall at threshold t
                 TP = np.logical_and(pred[valid]==1, gt[valid]==1).sum()
@@ -88,23 +101,7 @@ def test_em_unet(save_path, test_ds, device, thresholds=np.linspace(0.4, 0.55, 1
 
                 # Display some sample predictions
                 if k < num_samples_to_show:
-                    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-
-                    axes[0].imshow(img.cpu().numpy()[0, 0], cmap="gray")
-                    axes[0].set_title("Image")
-                    axes[0].axis("off")
-
-                    axes[1].imshow(mask_np, cmap="gray")
-                    axes[1].set_title("Ground Truth")
-                    axes[1].axis("off")
-                    
-                    axes[2].imshow(pred, cmap="gray")
-                    axes[2].set_title("Prediction")
-                    axes[2].axis("off")
-
-                    plt.tight_layout()
-                    plt.show()
-
+                    plot_image(img, mask_np, pred)
                     k+=1
 
     # Aggregate over all thresholds
@@ -130,7 +127,7 @@ def test_em_unet(save_path, test_ds, device, thresholds=np.linspace(0.4, 0.55, 1
     return mean_warp, mean_rand, mean_pix, mean_prec, mean_rec
 
 
-def test_cell_tracking_unet(save_path, test_ds, device, threshold=0.5, num_samples_to_show=2):
+def test_cell_tracking_unet(save_path, test_ds, device, threshold=0.25, num_samples_to_show=2):
     # Unpack hyperparameters
     model, batch_size = load_checkpoint(save_path, device)
     model.eval()
@@ -187,22 +184,7 @@ def test_cell_tracking_unet(save_path, test_ds, device, threshold=0.5, num_sampl
 
             # Display some sample predictions
             if i < num_samples_to_show:
-                fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-
-                axes[0].imshow(img.cpu().numpy()[0, 0], cmap="gray")
-                axes[0].set_title("Image")
-                axes[0].axis("off")
-
-                axes[1].imshow(mask_np, cmap="gray")
-                axes[1].set_title("Ground Truth")
-                axes[1].axis("off")
-
-                axes[2].imshow(pred_classes, cmap="gray")
-                axes[2].set_title("Prediction (Watershed)")
-                axes[2].axis("off")
-
-                plt.tight_layout()
-                plt.show()
+                plot_image(img, mask_np, pred_classes)
 
     # Average
     mean_iou   = np.mean(iou_scores)

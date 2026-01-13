@@ -5,8 +5,8 @@ from scipy import stats
 
 def compute_image_stats(img):
     """
-    img: numpy array grayscale, valeurs en [0,1] ou [0,255]
-    Retour: dict avec mean, std, rms_contrast, min, max, p2, p98, skew
+    img: numpy array grayscale, values ​​in [0.1] or [0.255] 
+    Return: dict with mean, std, rms_contrast, min, max, p2, p98, skew
     """
     mean = img.mean()
     std = img.std()
@@ -23,7 +23,7 @@ def plot_image_and_hist(img, title="image"):
     axes[0].axis("off")
     axes[0].set_title(title)
     axes[1].hist(img.flatten(), bins=256, range=(0,1))
-    axes[1].set_title("Histogramme")
+    axes[1].set_title("Histogram")
     plt.show()
 
 def contrast_stretch(img, low_perc=2, high_perc=98):
