@@ -42,7 +42,9 @@ Stratégie intelligente basée sur :
 
 ## Architecture
 
-```
+<img width="1555" height="1036" alt="u-net-architecture" src="https://github.com/user-attachments/assets/458a051a-ab5a-4c45-90fc-ebc5abc7204a" />
+
+
                 Input (572x572x1)
                        |
         ┌──────────────┴──────────────┐
